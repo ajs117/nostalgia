@@ -1,1 +1,107 @@
-<!doctype html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Instagram Saved Posts Viewer</title><link href="index.css" rel="stylesheet"/><script defer="defer" src="/static/js/main.f61f9793.js"></script><link href="/static/css/main.1e6b9956.css" rel="stylesheet"></head><body><div id="root"></div><script src="index.js"></script></body></html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Instagram Saved Posts Viewer</title>
+  <link rel="stylesheet" href="theme.css">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Header -->
+    <header class="header">
+      <h1>Instagram Saved Posts</h1>
+      <div class="header-controls">
+        <button id="sync-btn" class="btn btn-primary">Sync with Instagram</button>
+        <button id="clear-btn" class="btn btn-danger">Clear Storage</button>
+        <div id="sync-status" class="sync-status"></div>
+      </div>
+    </header>
+
+    <!-- Main Content Area -->
+    <div class="main-content-wrapper">
+      <!-- Sidebar for Filters -->
+      <aside class="sidebar">
+        <div class="filters-container">
+          <div class="search-box">
+            <input type="text" id="search-input" placeholder="Search posts by caption, username..." />
+            <svg class="search-icon" width="20" height="20" viewBox="0 0 20 20" fill="none">
+              <path d="M9 17C13.4183 17 17 13.4183 17 9C17 4.58172 13.4183 1 9 1C4.58172 1 1 4.58172 1 9C1 13.4183 4.58172 17 9 17Z" stroke="currentColor" stroke-width="2"/>
+              <path d="M19 19L14.65 14.65" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            </svg>
+          </div>
+
+          <div class="filter-group">
+            <label>Sort by:</label>
+            <select id="sort-select" class="select">
+              <option value="newest">Newest First</option>
+              <option value="oldest">Oldest First</option>
+              <option value="random">Random</option>
+            </select>
+          </div>
+
+          <div class="filter-group">
+            <label>Filter by type:</label>
+            <select id="type-filter" class="select">
+              <option value="all">All</option>
+              <option value="photo">Photos Only</option>
+              <option value="video">Videos Only</option>
+            </select>
+          </div>
+
+          <div class="hashtag-filter-container">
+            <label>Hashtags:</label>
+            <div id="hashtag-chips" class="hashtag-chips"></div>
+          </div>
+        </div>
+      </aside>
+
+      <!-- Main Content -->
+      <main class="main-content">
+        <!-- Stats -->
+        <div class="stats-bar">
+          <span id="total-count">0 posts</span>
+          <span id="filtered-count">Showing 0</span>
+          <span id="page-info">Page 1</span>
+        </div>
+
+        <!-- Gallery Grid -->
+        <div id="posts-container" class="posts-grid">
+          <div class="loading-placeholder">
+            <div class="spinner"></div>
+            <p>Loading posts...</p>
+          </div>
+        </div>
+
+        <!-- Pagination -->
+        <div id="pagination" class="pagination"></div>
+      </main>
+    </div>
+
+    <!-- Modal for viewing posts -->
+    <div id="modal" class="modal">
+      <div class="modal-content">
+        <button class="modal-close" id="modal-close">&times;</button>
+        <button class="modal-nav modal-prev" id="modal-prev">‹</button>
+        <button class="modal-nav modal-next" id="modal-next">›</button>
+        
+        <div id="modal-media" class="modal-media"></div>
+        <div class="modal-info">
+          <div class="modal-header">
+            <h3 id="modal-title"></h3>
+            <a id="modal-link" href="#" target="_blank" class="external-link">View on Instagram</a>
+          </div>
+          <div id="modal-caption" class="modal-caption"></div>
+          <div class="modal-meta">
+            <span id="modal-username"></span>
+            <span id="modal-hashtags" class="hashtags"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

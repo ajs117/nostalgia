@@ -4,7 +4,8 @@
          "128": "logo192.png",
          "16": "logo192.png",
          "48": "logo192.png"
-      }
+      },
+      "default_title": "Instagram Saved Posts"
    },
    "background": {
       "service_worker": "background.js"

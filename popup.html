@@ -1,13 +1,61 @@
 <!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Instagram Saved Posts Viewer</title>
-    <link href="index.css" rel="stylesheet" />
-  </head>
-  <body>
-    <div id="popup-root"></div>
-    <script src="popup.js"></script>
-  </body>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Instagram Saved Posts</title>
+  <link rel="stylesheet" href="theme.css">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="popup-container">
+    <header class="popup-header">
+      <h2>Instagram Saved Posts</h2>
+    </header>
+
+    <div class="popup-content">
+      <div class="popup-stats">
+        <div class="stat-item">
+          <span class="stat-label">Total Posts</span>
+          <span id="total-posts" class="stat-value">0</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">Collections</span>
+          <span id="total-collections" class="stat-value">0</span>
+        </div>
+      </div>
+
+      <div class="popup-actions">
+        <button id="open-main" class="btn btn-primary w-full">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <path d="M8 2L2 8H5V14H11V8H14L8 2Z" fill="currentColor"/>
+          </svg>
+          Open Viewer
+        </button>
+        
+        <button id="sync-now" class="btn btn-secondary w-full">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <path d="M8 1V7H14M14 9V15H8M2 7H8V1M8 9V15H2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+          Sync Now
+        </button>
+
+        <button id="clear-storage" class="btn btn-danger w-full">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <path d="M4 4L12 12M12 4L4 12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+          Clear Storage
+        </button>
+      </div>
+
+      <div id="popup-status" class="popup-status hidden"></div>
+
+      <div class="popup-footer">
+        <p class="footer-text">Manage your saved Instagram posts</p>
+      </div>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
 </html>
