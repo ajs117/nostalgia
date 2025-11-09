@@ -32,22 +32,31 @@ function createVideoElement(src, useCrossOrigin = false) {
 
 function createImageElement(src, useCrossOrigin = false) {
   const img = document.createElement('img');
-  img.src = src;
-  img.alt = 'Instagram post';
-  img.loading = 'lazy';
-  img.style.width = '100%';
-  img.style.height = '280px';
-  img.style.objectFit = 'cover';
-  if (useCrossOrigin) {
-    img.crossOrigin = 'anonymous';
-  }
   const placeholder = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="280" height="280"%3E%3Crect fill="%23ddd" width="280" height="280"/%3E%3Ctext x="50%25" y="50%25" text-anchor="middle" dy=".3em" fill="%23999" font-family="Arial"%3EImage not available%3C/text%3E%3C/svg%3E';
-  img.onerror = () => {
-    if (!src.startsWith('data:')) {
-      console.error(`Image load error:`, src);
+  
+  // Validate and set image source
+  if (!src) {
+    console.warn('Image source is null or undefined');
+    img.src = placeholder;
+  } else if (typeof src === 'string' && src.startsWith('data:')) {
+    // Valid base64 data URL
+    img.src = src;
+    img.alt = 'Instagram post';
+    img.loading = 'lazy';
+    img.style.width = '100%';
+    img.style.height = '280px';
+    img.style.objectFit = 'cover';
+    img.style.display = 'block';
+    img.onerror = () => {
+      console.error(`Image load error for data URL (first 100 chars):`, src.substring(0, 100));
       img.src = placeholder;
-    }
-  };
+    };
+  } else {
+    // Invalid source - not a data URL
+    console.warn(`Invalid image source (expected data: URL):`, src ? src.substring(0, 100) : 'null');
+    img.src = placeholder;
+  }
+  
   return img;
 }
 
@@ -112,42 +121,92 @@ function convertIndexedDBKeyToDataURL(key) {
   });
 }
 
-// Debug function to inspect IndexedDB
-function debugIndexedDB() {
+// Show DB Info in modal
+function showDbInfo() {
+  const modal = document.getElementById('db-modal');
+  const content = document.getElementById('db-info-content');
+  
+  modal.classList.add('active');
+  document.body.style.overflow = 'hidden';
+  
+  content.innerHTML = `
+    <div class="loading-placeholder">
+      <div class="spinner"></div>
+      <p>Loading database info...</p>
+    </div>
+  `;
+  
+  // Get IndexedDB data (which now contains everything)
   chrome.runtime.sendMessage({ action: 'DEBUG_INDEXEDDB' }, (response) => {
     if (chrome.runtime.lastError) {
-      console.error('Error:', chrome.runtime.lastError);
-      alert('Error accessing IndexedDB: ' + chrome.runtime.lastError.message);
+      content.innerHTML = `
+        <div class="error-message">
+          <p>Error accessing IndexedDB: ${chrome.runtime.lastError.message}</p>
+        </div>
+      `;
       return;
     }
     
     if (response && response.success) {
       const data = response.data;
-      console.log('=== IndexedDB Debug Info ===');
-      console.log(`Total keys: ${data.totalKeys}`);
-      console.log(`Image keys: ${data.imageKeys}`);
-      console.log(`Video keys: ${data.videoKeys}`);
-      console.log('\nFirst 100 keys:');
-      console.log(data.keys);
-      console.log('\nSample data (first 5):');
-      console.table(data.sampleData);
-      console.log('\n=== Copy this JSON for debugging ===');
+      const posts = data.posts?.data || [];
+      const collections = data.collections?.data || [];
       
-      // Create a formatted output
-      const output = {
-        summary: {
-          totalKeys: data.totalKeys,
-          imageKeys: data.imageKeys,
-          videoKeys: data.videoKeys
-        },
-        keys: data.keys,
-        sampleData: data.sampleData
+      // Prepare data for display
+      const displayData = {
+        indexedDB: {
+          media: {
+            totalKeys: data.totalKeys,
+            imageKeys: data.imageKeys,
+            videoKeys: data.videoKeys,
+            keys: data.keys,
+            sampleData: data.sampleData
+          },
+          posts: {
+            count: posts.length,
+            data: posts
+          },
+          collections: {
+            count: collections.length,
+            data: collections
+          }
+        }
       };
       
-      const jsonOutput = JSON.stringify(output, null, 2);
-      console.log(jsonOutput);
+      const jsonOutput = JSON.stringify(displayData, null, 2);
       
-      // Show in alert for easy copying
+      content.innerHTML = `
+        <div class="db-stats">
+          <div class="db-stat-item">
+            <span class="db-stat-label">Posts (IndexedDB):</span>
+            <span class="db-stat-value">${posts.length}</span>
+          </div>
+          <div class="db-stat-item">
+            <span class="db-stat-label">Collections:</span>
+            <span class="db-stat-value">${collections.length}</span>
+          </div>
+          <div class="db-stat-item">
+            <span class="db-stat-label">Media Keys:</span>
+            <span class="db-stat-value">${data.totalKeys || 0}</span>
+          </div>
+        </div>
+        <div class="db-storage-info">
+          <h3>Storage Location</h3>
+          <div class="storage-location">
+            <strong>IndexedDB:</strong> All data (posts, collections, and media) is stored here
+          </div>
+        </div>
+        <div class="db-raw-data">
+          <div class="db-raw-header">
+            <h3>Raw Database Data (JSON)</h3>
+            <button id="copy-db-data" class="btn btn-secondary btn-small">Copy JSON</button>
+          </div>
+          <pre id="db-json-output" class="db-json">${escapeHtml(jsonOutput)}</pre>
+        </div>
+      `;
+    
+    // Add copy functionality
+    document.getElementById('copy-db-data').addEventListener('click', () => {
       const textarea = document.createElement('textarea');
       textarea.value = jsonOutput;
       textarea.style.position = 'fixed';
@@ -157,12 +216,35 @@ function debugIndexedDB() {
       document.execCommand('copy');
       document.body.removeChild(textarea);
       
-      alert(`IndexedDB Debug Info (copied to clipboard):\n\nTotal: ${data.totalKeys} keys\nImages: ${data.imageKeys}\nVideos: ${data.videoKeys}\n\nCheck console for full details and JSON output.`);
+      const btn = document.getElementById('copy-db-data');
+      const originalText = btn.textContent;
+      btn.textContent = 'Copied!';
+      btn.disabled = true;
+      setTimeout(() => {
+        btn.textContent = originalText;
+        btn.disabled = false;
+      }, 2000);
+    });
     } else {
-      console.error('Failed to get IndexedDB info:', response?.error);
-      alert('Failed to get IndexedDB info: ' + (response?.error || 'Unknown error'));
+      content.innerHTML = `
+        <div class="error-message">
+          <p>Failed to get IndexedDB info: ${response?.error || 'Unknown error'}</p>
+        </div>
+      `;
     }
   });
+}
+
+function closeDbModal() {
+  const modal = document.getElementById('db-modal');
+  modal.classList.remove('active');
+  document.body.style.overflow = '';
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
 }
 
 
@@ -180,17 +262,28 @@ function initializeEventListeners() {
   document.getElementById('type-filter').addEventListener('change', handleTypeFilterChange);
   document.getElementById('sync-btn').addEventListener('click', handleSync);
   document.getElementById('clear-btn').addEventListener('click', handleClearStorage);
+  document.getElementById('db-info-btn').addEventListener('click', showDbInfo);
   document.getElementById('modal-close').addEventListener('click', closeModal);
+  document.getElementById('db-modal-close').addEventListener('click', closeDbModal);
   document.getElementById('modal-prev').addEventListener('click', () => navigateModal(-1));
   document.getElementById('modal-next').addEventListener('click', () => navigateModal(1));
   document.getElementById('modal').addEventListener('click', (e) => {
     if (e.target.id === 'modal') closeModal();
   });
+  document.getElementById('db-modal').addEventListener('click', (e) => {
+    if (e.target.id === 'db-modal') closeDbModal();
+  });
 
   // Keyboard navigation
   document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      if (currentModalIndex >= 0) {
+        closeModal();
+      } else if (document.getElementById('db-modal').classList.contains('active')) {
+        closeDbModal();
+      }
+    }
     if (currentModalIndex >= 0) {
-      if (e.key === 'Escape') closeModal();
       if (e.key === 'ArrowLeft') navigateModal(-1);
       if (e.key === 'ArrowRight') navigateModal(1);
     }
@@ -222,47 +315,10 @@ function loadPosts() {
 function setupMessageListener() {
   chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === 'UPDATE_ITEMS') {
-      // Debounce updates to prevent flickering
-      clearTimeout(window.updateTimeout);
-      window.updateTimeout = setTimeout(() => {
-        // Get current displayed post IDs to preserve state
-        const currentPostIds = new Set(displayedPosts.map(p => p.id));
-        
-        // Load new posts
-        chrome.runtime.sendMessage({ action: 'GET_INSTAGRAM_POSTS' }, (response) => {
-          if (chrome.runtime.lastError) {
-            console.error('Error loading posts:', chrome.runtime.lastError);
-            return;
-          }
-
-          if (response && response.success) {
-            const newPosts = response.posts || [];
-            const newPostIds = new Set(newPosts.map(p => p.id));
-            
-            // Only update if there are actually new posts
-            const hasNewPosts = Array.from(newPostIds).some(id => !currentPostIds.has(id));
-            
-            if (hasNewPosts || newPosts.length !== allPosts.length) {
-              allPosts = newPosts;
-              
-              // Check if we're currently viewing posts that would be affected
-              const oldFilteredCount = filteredPosts.length;
-              applyFilters();
-              
-              // Only re-render if the filtered list changed or if we're on page 1
-              // (new posts typically appear on page 1, so only update there)
-              if (currentPage === 1 && (filteredPosts.length !== oldFilteredCount || hasNewPosts)) {
-                renderPosts();
-                updateStats();
-              } else {
-                // Just update stats without re-rendering to avoid flickering
-                updateStats();
-              }
-            }
-          }
-        });
-      }, 500);
+      // Immediately reload posts when update is received
+      loadPosts();
     }
+    return true; // Keep channel open for async response
   });
 }
 
@@ -440,25 +496,17 @@ function updateHashtagChips() {
 
 // Update pagination
 function updatePagination() {
-  const totalPages = Math.ceil(filteredPosts.length / postsPerPage);
-  currentPage = Math.min(currentPage, Math.max(1, totalPages));
-  
+  const totalPages = Math.max(1, Math.ceil(filteredPosts.length / postsPerPage));
+  // Ensure currentPage is valid
+  if (currentPage < 1) currentPage = 1;
+  if (currentPage > totalPages) currentPage = totalPages;
+
   const start = (currentPage - 1) * postsPerPage;
   const end = start + postsPerPage;
   displayedPosts = filteredPosts.slice(start, end);
 
   renderPagination(totalPages);
-  
-  // Update page input if it exists
-  const pageInput = document.getElementById('page-input');
-  if (pageInput) {
-    pageInput.value = currentPage;
-    pageInput.max = totalPages;
-    const ofSpan = pageInput.parentElement.querySelector('span:last-child');
-    if (ofSpan) {
-      ofSpan.textContent = `of ${totalPages}`;
-    }
-  }
+  updateStats(); // Update stats after pagination changes
 }
 
 // Render pagination controls
@@ -477,9 +525,12 @@ function renderPagination(totalPages) {
   prevBtn.textContent = '‹ Previous';
   prevBtn.disabled = currentPage === 1;
   prevBtn.addEventListener('click', () => {
-    currentPage--;
-    renderPosts();
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    if (currentPage > 1) {
+      currentPage--;
+      updatePagination(); // This now calls updateStats internally
+      renderPosts();
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
   });
   container.appendChild(prevBtn);
 
@@ -498,6 +549,7 @@ function renderPagination(totalPages) {
     btn.className = i === currentPage ? 'active' : '';
     btn.addEventListener('click', () => {
       currentPage = i;
+      updatePagination(); // This now calls updateStats internally
       renderPosts();
       window.scrollTo({ top: 0, behavior: 'smooth' });
     });
@@ -519,6 +571,7 @@ function renderPagination(totalPages) {
       const pageNum = parseInt(pageInput.value, 10);
       if (pageNum >= 1 && pageNum <= totalPages) {
         currentPage = pageNum;
+        updatePagination(); // This now calls updateStats internally
         renderPosts();
         window.scrollTo({ top: 0, behavior: 'smooth' });
       } else {
@@ -532,6 +585,7 @@ function renderPagination(totalPages) {
     if (pageNum >= 1 && pageNum <= totalPages) {
       if (pageNum !== currentPage) {
         currentPage = pageNum;
+        updatePagination(); // This now calls updateStats internally
         renderPosts();
         window.scrollTo({ top: 0, behavior: 'smooth' });
       }
@@ -547,9 +601,12 @@ function renderPagination(totalPages) {
   nextBtn.textContent = 'Next ›';
   nextBtn.disabled = currentPage === totalPages;
   nextBtn.addEventListener('click', () => {
-    currentPage++;
-    renderPosts();
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    if (currentPage < totalPages) {
+      currentPage++;
+      updatePagination(); // This now calls updateStats internally
+      renderPosts();
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
   });
   container.appendChild(nextBtn);
 }
@@ -613,54 +670,24 @@ function createPostCard(post, index) {
   const mediaContainer = document.createElement('div');
   mediaContainer.style.position = 'relative';
 
-  if (post.isVideo && post.videoUrl) {
-    // Check if videoUrl is an IndexedDB key (legacy) or a direct URL
-    if (post.videoUrl.startsWith('idb:')) {
-      // Legacy: Convert IndexedDB key to data URL
-      const videoKey = post.videoUrl.substring(4);
-      convertIndexedDBKeyToDataURL(videoKey).then(dataUrl => {
-        if (dataUrl && dataUrl.startsWith('data:')) {
-          const video = createVideoElement(dataUrl);
-          mediaContainer.appendChild(video);
-        } else {
-          createPlaceholder(mediaContainer, 'Video not found');
-        }
-      }).catch(err => {
-        console.error(`Error converting video key:`, err);
-        createPlaceholder(mediaContainer, 'Video conversion error', true);
-      });
-    } else {
-      // Direct CDN URL - use crossOrigin for CORS
-      const video = createVideoElement(post.videoUrl, true);
-      mediaContainer.appendChild(video);
-    }
+  // Display thumbnail (base64 data URL stored directly in post.image)
+  if (post.image && typeof post.image === 'string' && post.image.startsWith('data:')) {
+    // Valid base64 data URL - display it
+    const img = createImageElement(post.image);
+    mediaContainer.appendChild(img);
     
-    const indicator = document.createElement('div');
-    indicator.className = 'video-indicator';
-    indicator.innerHTML = '▶ Video';
-    mediaContainer.appendChild(indicator);
-  } else if (post.image) {
-    // Check if image is an IndexedDB key (legacy) or a direct URL
-    if (post.image && post.image.startsWith('idb:')) {
-      // Legacy: Convert IndexedDB key to data URL
-      const imageKey = post.image.substring(4);
-      convertIndexedDBKeyToDataURL(imageKey).then(dataUrl => {
-        if (dataUrl && dataUrl.startsWith('data:')) {
-          const img = createImageElement(dataUrl);
-          mediaContainer.appendChild(img);
-        } else {
-          console.error(`Failed to get data URL for image key: ${imageKey}`);
-          createPlaceholder(mediaContainer, 'Image not found');
-        }
-      }).catch(err => {
-        console.error(`Error converting image key:`, err);
-        createPlaceholder(mediaContainer, 'Image conversion error', true);
-      });
-    } else {
-      // Direct CDN URL - use crossOrigin for CORS
-      const img = createImageElement(post.image, true);
-      mediaContainer.appendChild(img);
+    // Add video indicator if it's a video
+    if (post.isVideo) {
+      const indicator = document.createElement('div');
+      indicator.className = 'video-indicator';
+      indicator.innerHTML = '▶ Video';
+      mediaContainer.appendChild(indicator);
     }
+  } else {
+    // No valid image - show placeholder
+    const message = post.isVideo ? 'Video thumbnail not available' : 'Image not available';
+    createPlaceholder(mediaContainer, message);
+    console.warn(`Post ${post.id} has invalid image:`, post.image ? post.image.substring(0, 50) : 'null');
   }
 
   const overlay = document.createElement('div');
@@ -742,72 +769,36 @@ function openModal(index) {
   // Clear previous content (this will also remove any remaining video elements)
   mediaContainer.innerHTML = '';
 
-  if (post.isVideo && post.videoUrl) {
-    // Check if videoUrl is an IndexedDB key reference
-    if (post.videoUrl.startsWith('idb:')) {
-      // Convert IndexedDB key to data URL
-      convertIndexedDBKeyToDataURL(post.videoUrl.substring(4)).then(dataUrl => {
-        if (dataUrl) {
-          const video = document.createElement('video');
-          video.src = dataUrl;
-          video.controls = true;
-          // Let CSS handle sizing - video will take full available space in modal-media
-          video.style.cssText = 'width: auto; height: auto; max-width: 100%; max-height: 90vh; object-fit: contain; display: block;';
-          mediaContainer.appendChild(video);
-        } else {
-          mediaContainer.innerHTML = '<p style="color: var(--error); padding: 20px;">Failed to load video</p>';
-        }
-      });
-    } else {
-      // Direct CDN URL
-      const video = document.createElement('video');
-      video.src = post.videoUrl;
-      video.controls = true;
-      video.crossOrigin = 'anonymous';
-      // Let CSS handle sizing - video will take full available space in modal-media
-      video.style.cssText = 'width: auto; height: auto; max-width: 100%; max-height: 90vh; object-fit: contain; display: block;';
-      video.onerror = () => {
-        console.error(`Modal video URL error:`, post.videoUrl);
-        mediaContainer.innerHTML = '<p style="color: var(--error); padding: 20px;">Video failed to load</p>';
-      };
-      mediaContainer.appendChild(video);
+  // Display image in modal (base64 data URL stored directly in post.image)
+  if (post.image && typeof post.image === 'string' && post.image.startsWith('data:')) {
+    const img = document.createElement('img');
+    img.src = post.image;
+    img.alt = post.title || (post.isVideo ? 'Instagram video' : 'Instagram post');
+    img.style.maxHeight = '70vh';
+    img.style.width = 'auto';
+    img.style.maxWidth = '100%';
+    img.style.display = 'block';
+    img.style.margin = '0 auto';
+    img.onerror = () => {
+      console.error(`Modal image error for post ${post.id}:`, post.image ? post.image.substring(0, 100) : 'null');
+      mediaContainer.innerHTML = '<p style="color: var(--error); padding: 20px;">Image failed to load</p>';
+    };
+    mediaContainer.appendChild(img);
+    
+    // Add video indicator overlay if it's a video
+    if (post.isVideo) {
+      const videoIndicator = document.createElement('div');
+      videoIndicator.style.cssText = 'position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(0,0,0,0.7); color: white; padding: 12px 24px; border-radius: 8px; font-size: 18px; pointer-events: none; z-index: 10;';
+      videoIndicator.innerHTML = '▶ Video - Click to view on Instagram';
+      mediaContainer.appendChild(videoIndicator);
     }
-  } else if (post.image) {
-    // Check if image is an IndexedDB key (legacy) or a direct URL
-    if (post.image && post.image.startsWith('idb:')) {
-      // Legacy: Convert IndexedDB key to data URL
-      convertIndexedDBKeyToDataURL(post.image.substring(4)).then(dataUrl => {
-        if (dataUrl && dataUrl.startsWith('data:')) {
-          const img = document.createElement('img');
-          img.src = dataUrl;
-          img.alt = post.title || 'Instagram post';
-          img.style.maxHeight = '70vh';
-          img.style.width = 'auto';
-          img.onerror = () => {
-            mediaContainer.innerHTML = '<p style="color: var(--error); padding: 20px;">Image failed to load</p>';
-          };
-          mediaContainer.appendChild(img);
-        } else {
-          mediaContainer.innerHTML = '<p style="color: var(--error); padding: 20px;">Failed to load image</p>';
-        }
-      }).catch(err => {
-        console.error(`Modal image error:`, err);
-        mediaContainer.innerHTML = '<p style="color: var(--error); padding: 20px;">Image conversion error</p>';
-      });
-    } else {
-      // Direct CDN URL
-      const img = document.createElement('img');
-      img.src = post.image;
-      img.alt = post.title || 'Instagram post';
-      img.style.maxHeight = '70vh';
-      img.style.width = 'auto';
-      img.crossOrigin = 'anonymous';
-      img.onerror = () => {
-        console.error(`Modal image URL error:`, post.image);
-        mediaContainer.innerHTML = '<p style="color: var(--error); padding: 20px;">Image failed to load</p>';
-      };
-      mediaContainer.appendChild(img);
-    }
+  } else {
+    // No valid image - show message
+    const message = post.isVideo 
+      ? `<p style="color: var(--text-secondary); padding: 20px;">Video thumbnail not available. <a href="${post.videoUrl || post.link}" target="_blank" style="color: var(--accent);">View on Instagram</a></p>`
+      : '<p style="color: var(--text-secondary); padding: 20px;">Image not available</p>';
+    mediaContainer.innerHTML = message;
+    console.warn(`Modal: Post ${post.id} has invalid image:`, post.image ? post.image.substring(0, 50) : 'null');
   }
 
   titleEl.textContent = post.title || 'Untitled';

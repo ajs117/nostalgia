@@ -33,6 +33,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 });
 
 function checkForSavedProgress(tabId = null) {
+  // Sync progress is still in chrome.storage.local for now (temporary state)
   chrome.storage.local.get(["instagram_sync_progress"], (result) => {
     if (result.instagram_sync_progress) {
       // There's saved progress, notify the Instagram tab
@@ -58,34 +59,25 @@ function checkForSavedProgress(tabId = null) {
 }
 
 function updateExtensionTab() {
-  if (extensionTabId !== null) {
-    chrome.tabs.get(extensionTabId, (tab) => {
-      if (chrome.runtime.lastError) {
-        console.log("Extension tab not found, creating new tab");
-        chrome.tabs.create(
-          { url: chrome.runtime.getURL("index.html") },
-          (newTab) => {
-            extensionTabId = newTab.id;
-          }
-        );
-      } else {
-        // Send message to extension tab to update display
-        chrome.tabs.sendMessage(extensionTabId, { action: "UPDATE_ITEMS" }, () => {
+  // Find all extension tabs (index.html) and send update message to all of them
+  chrome.tabs.query({ url: chrome.runtime.getURL("index.html") }, (tabs) => {
+    if (tabs.length > 0) {
+      // Update extensionTabId to the first active tab, or first tab if none active
+      const activeTab = tabs.find(tab => tab.active) || tabs[0];
+      if (activeTab) {
+        extensionTabId = activeTab.id;
+      }
+      
+      // Send update message to all extension tabs
+      tabs.forEach(tab => {
+        chrome.tabs.sendMessage(tab.id, { action: "UPDATE_ITEMS" }, () => {
           if (chrome.runtime.lastError) {
-            // Extension tab might not be ready, that's okay
+            // Tab might not be ready, that's okay
           }
         });
-      }
-    });
-  } else {
-    console.log("No extension tab found, creating new tab");
-    chrome.tabs.create(
-      { url: chrome.runtime.getURL("index.html") },
-      (newTab) => {
-        extensionTabId = newTab.id;
-      }
-    );
-  }
+      });
+    }
+  });
 }
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
@@ -125,23 +117,28 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       );
     }
   } else if (request.action === "GET_INSTAGRAM_POSTS") {
-    // Retrieve posts and convert IndexedDB keys to data URLs for display
-    chrome.storage.local.get(["instagramSavedPosts"], async (result) => {
-      let posts = [];
-      try {
-        posts = result.instagramSavedPosts ? JSON.parse(result.instagramSavedPosts) : [];
-      } catch (error) {
-        console.error("Error parsing posts:", error);
-        sendResponse({ success: false, error: error.message });
-        return;
-      }
-      
+    // Retrieve posts from IndexedDB and convert IndexedDB keys to data URLs for display
+    getPostsFromIndexedDB().then(async (posts) => {
       // Convert IndexedDB keys to data URLs on-demand
       const formattedPosts = await Promise.all(
         posts.map(post => formatInstagramPostObj(post))
       );
       
-      sendResponse({ success: true, posts: formattedPosts });
+      // Filter out null posts (formatting errors)
+      const validPosts = formattedPosts.filter(post => post !== null);
+      
+      sendResponse({ success: true, posts: validPosts });
+    }).catch((error) => {
+      console.error("Error retrieving posts:", error);
+      sendResponse({ success: false, error: error.message });
+    });
+    return true; // Async response
+  } else if (request.action === "GET_COLLECTIONS") {
+    getCollectionsFromIndexedDB().then((collections) => {
+      sendResponse({ success: true, collections });
+    }).catch((error) => {
+      console.error("Error retrieving collections:", error);
+      sendResponse({ success: false, error: error.message, collections: [] });
     });
     return true; // Async response
   } else if (request.action === "SYNC_WITH_INSTAGRAM") {
@@ -162,16 +159,15 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         
         if (!isResuming) {
           // Clear existing posts only if starting fresh (not resuming)
-          chrome.storage.local.set(
-            {
-              instagramSavedPosts: JSON.stringify([]),
-            },
-            () => {
-              chrome.tabs.sendMessage(activeInstagramTabId, {
-                action: "IMPORT_INSTAGRAM_POSTS",
-              });
-            }
-          );
+          storePostsInIndexedDB([]).then(() => {
+            chrome.tabs.sendMessage(activeInstagramTabId, {
+              action: "IMPORT_INSTAGRAM_POSTS",
+            });
+          }).catch(() => {
+            chrome.tabs.sendMessage(activeInstagramTabId, {
+              action: "IMPORT_INSTAGRAM_POSTS",
+            });
+          });
         } else {
           // Just start the sync if resuming
           chrome.tabs.sendMessage(activeInstagramTabId, {
@@ -195,17 +191,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       );
     }
   } else if (request.action === "SAVE_POSTS_BATCH") {
-    // Save batch of posts by appending to existing posts
-    chrome.storage.local.get(["instagramSavedPosts"], async (result) => {
-      let existingPosts = [];
-      try {
-        existingPosts = result.instagramSavedPosts
-          ? JSON.parse(result.instagramSavedPosts)
-          : [];
-      } catch (error) {
-        console.error("Error parsing existing posts:", error);
-      }
-
+    // Save batch of posts by appending to existing posts in IndexedDB
+    getPostsFromIndexedDB().then((existingPosts) => {
       // Store posts with IndexedDB key references (small) - don't convert to data URLs yet
       // The conversion will happen on-demand when displaying posts
       const newPosts = request.posts.map((post) => {
@@ -216,53 +203,37 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return {
           id: post.id || `${username}-${Date.now()}`,
           link: url,
-          image: thumbnail, // Keep IndexedDB key reference (e.g., "idb:img_123")
+          thumbnail: thumbnail, // Store base64 data URL directly in thumbnail field
           title,
           username,
           collectionIds,
           isVideo,
           videoUrl, // Keep IndexedDB key reference (e.g., "idb:vid_123")
+          timestamp: post.timestamp || Date.now(),
         };
       }).filter(Boolean);
       const allPosts = [...existingPosts, ...newPosts];
 
-      chrome.storage.local.set(
-        {
-          instagramSavedPosts: JSON.stringify(allPosts),
-        },
-        () => {
-          if (chrome.runtime.lastError) {
-            console.error(
-              "Error saving batch to storage:",
-              chrome.runtime.lastError
-            );
-            sendResponse({ success: false });
-          } else {
-            console.log(`Saved batch of ${newPosts.length} posts. Total: ${allPosts.length}`);
-            // Update extension tab to show new posts
-            updateExtensionTab();
-            sendResponse({ success: true });
-          }
-        }
-      );
+      storePostsInIndexedDB(allPosts).then(() => {
+        console.log(`Saved batch of ${newPosts.length} posts. Total: ${allPosts.length}`);
+        // Update extension tab to show new posts
+        updateExtensionTab();
+        sendResponse({ success: true });
+      }).catch((error) => {
+        console.error("Error saving batch to IndexedDB:", error);
+        sendResponse({ success: false, error: error.message });
+      });
+    }).catch((error) => {
+      console.error("Error getting existing posts:", error);
+      sendResponse({ success: false, error: error.message });
     });
     return true; // Async response
   } else if (request.action === "SAVE_COLLECTIONS") {
-    chrome.storage.local.set(
-      {
-        instagramCollections: JSON.stringify(request.collections),
-      },
-      () => {
-        if (chrome.runtime.lastError) {
-          console.error(
-            "Error saving collections:",
-            chrome.runtime.lastError
-          );
-        } else {
-          console.log(`Saved ${request.collections.length} collections`);
-        }
-      }
-    );
+    storeCollectionsInIndexedDB(request.collections).then(() => {
+      console.log(`Saved ${request.collections.length} collections`);
+    }).catch((error) => {
+      console.error("Error saving collections:", error);
+    });
   } else if (request.action === "SYNC_FINISHED") {
     chrome.runtime.sendMessage({
       action: "SYNC_COMPLETE",
@@ -342,6 +313,38 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       sendResponse({ success: false, error: error.message });
     }
     return true; // Async response
+  } else if (request.action === "FETCH_AND_STORE_THUMBNAIL") {
+    // Service workers can't use Image/Canvas, so just fetch and store without compression
+    // Compression should happen in content script
+    const { imageUrl, postId } = request;
+    const thumbnailKey = `thumb_${postId}`;
+    
+    fetchImageAsDataURL(imageUrl)
+      .then((dataUrl) => {
+        // Convert data URL to blob and store directly (no compression in service worker)
+        fetch(dataUrl)
+          .then(res => res.blob())
+          .then(blob => {
+            storeMediaInIndexedDB(thumbnailKey, blob)
+              .then(() => {
+                console.log(`✓ Stored thumbnail via background (no compression): ${thumbnailKey}`);
+                sendResponse({ success: true, thumbnailKey });
+              })
+              .catch((error) => {
+                console.error(`✗ Error storing thumbnail:`, error);
+                sendResponse({ success: false, error: error.message });
+              });
+          })
+          .catch((error) => {
+            console.error(`Error converting data URL to blob:`, error);
+            sendResponse({ success: false, error: error.message });
+          });
+      })
+      .catch((error) => {
+        console.error(`Error fetching thumbnail:`, error);
+        sendResponse({ success: false, error: error.message });
+      });
+    return true; // Async response
   } else if (request.action === "DEBUG_INDEXEDDB") {
     // Debug tool to inspect IndexedDB contents
     debugIndexedDB().then((result) => {
@@ -357,8 +360,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
 // IndexedDB helper functions
 const DB_NAME = "instagram_media_db";
-const DB_VERSION = 1;
-const STORE_NAME = "media";
+const DB_VERSION = 2; // Increment version to add new stores
+const STORE_MEDIA = "media";
+const STORE_POSTS = "posts";
+const STORE_COLLECTIONS = "collections";
 
 function openDB() {
   return new Promise((resolve, reject) => {
@@ -369,8 +374,20 @@ function openDB() {
     
     request.onupgradeneeded = (event) => {
       const db = event.target.result;
-      if (!db.objectStoreNames.contains(STORE_NAME)) {
-        db.createObjectStore(STORE_NAME);
+      
+      // Create media store if it doesn't exist
+      if (!db.objectStoreNames.contains(STORE_MEDIA)) {
+        db.createObjectStore(STORE_MEDIA);
+      }
+      
+      // Create posts store if it doesn't exist
+      if (!db.objectStoreNames.contains(STORE_POSTS)) {
+        db.createObjectStore(STORE_POSTS);
+      }
+      
+      // Create collections store if it doesn't exist
+      if (!db.objectStoreNames.contains(STORE_COLLECTIONS)) {
+        db.createObjectStore(STORE_COLLECTIONS);
       }
     };
   });
@@ -380,8 +397,8 @@ async function storeMediaInIndexedDB(key, blob) {
   try {
     const db = await openDB();
     return new Promise((resolve, reject) => {
-      const transaction = db.transaction([STORE_NAME], "readwrite");
-      const store = transaction.objectStore(STORE_NAME);
+      const transaction = db.transaction([STORE_MEDIA], "readwrite");
+      const store = transaction.objectStore(STORE_MEDIA);
       const request = store.put(blob, key);
       
       request.onsuccess = () => resolve();
@@ -394,45 +411,127 @@ async function storeMediaInIndexedDB(key, blob) {
   }
 }
 
+async function storePostsInIndexedDB(posts) {
+  try {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction([STORE_POSTS], "readwrite");
+      const store = transaction.objectStore(STORE_POSTS);
+      const request = store.put(posts, "all_posts");
+      
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error);
+      transaction.oncomplete = () => db.close();
+    });
+  } catch (error) {
+    console.error("Error storing posts in IndexedDB:", error);
+    throw error;
+  }
+}
+
+async function getPostsFromIndexedDB() {
+  try {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction([STORE_POSTS], "readonly");
+      const store = transaction.objectStore(STORE_POSTS);
+      const request = store.get("all_posts");
+      
+      request.onsuccess = () => {
+        const posts = request.result || [];
+        db.close();
+        resolve(posts);
+      };
+      request.onerror = () => {
+        db.close();
+        reject(request.error);
+      };
+    });
+  } catch (error) {
+    console.error("Error retrieving posts from IndexedDB:", error);
+    return [];
+  }
+}
+
+async function storeCollectionsInIndexedDB(collections) {
+  try {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction([STORE_COLLECTIONS], "readwrite");
+      const store = transaction.objectStore(STORE_COLLECTIONS);
+      const request = store.put(collections, "all_collections");
+      
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error);
+      transaction.oncomplete = () => db.close();
+    });
+  } catch (error) {
+    console.error("Error storing collections in IndexedDB:", error);
+    throw error;
+  }
+}
+
+async function getCollectionsFromIndexedDB() {
+  try {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction([STORE_COLLECTIONS], "readonly");
+      const store = transaction.objectStore(STORE_COLLECTIONS);
+      const request = store.get("all_collections");
+      
+      request.onsuccess = () => {
+        const collections = request.result || [];
+        db.close();
+        resolve(collections);
+      };
+      request.onerror = () => {
+        db.close();
+        reject(request.error);
+      };
+    });
+  } catch (error) {
+    console.error("Error retrieving collections from IndexedDB:", error);
+    return [];
+  }
+}
+
 async function getMediaFromIndexedDB(key) {
   try {
     const db = await openDB();
     return new Promise((resolve, reject) => {
-      const transaction = db.transaction([STORE_NAME], "readonly");
-      const store = transaction.objectStore(STORE_NAME);
+      const transaction = db.transaction([STORE_MEDIA], "readonly");
+      const store = transaction.objectStore(STORE_MEDIA);
       const request = store.get(key);
       
       request.onsuccess = () => {
         const blob = request.result;
         if (blob) {
+          console.log(`Found blob for key ${key}: ${blob.size} bytes, type: ${blob.type}`);
           // Convert blob to data URL for display
           const reader = new FileReader();
           reader.onloadend = () => {
+            const dataUrl = reader.result;
+            console.log(`Converted ${key} to data URL: ${dataUrl ? dataUrl.substring(0, 50) + '...' : 'null'}`);
             db.close();
-            resolve(reader.result);
+            resolve(dataUrl);
           };
           reader.onerror = () => {
             console.error(`FileReader error for key: ${key}`);
             db.close();
-            reject(new Error('FileReader failed'));
+            resolve(null);
           };
           reader.readAsDataURL(blob);
         } else {
           console.warn(`No blob found in IndexedDB for key: ${key}`);
-          // Try to list all keys to debug (but don't wait for it)
-          const getAllRequest = store.getAllKeys();
-          getAllRequest.onsuccess = () => {
-            const keys = getAllRequest.result;
-            const matchingKeys = keys.filter(k => {
-              const keyPart = key.split('_').slice(1).join('_');
-              return k.includes(keyPart) || key.includes(k.split('_').slice(1).join('_'));
-            });
-            console.log(`Available keys sample (first 20):`, keys.slice(0, 20));
-            console.log(`Looking for key: ${key}`);
+          // List available keys to help debug
+          const getAllKeysRequest = store.getAllKeys();
+          getAllKeysRequest.onsuccess = () => {
+            const allKeys = getAllKeysRequest.result;
+            const matchingKeys = allKeys.filter(k => k.includes(key.split('_').slice(-1)[0]) || key.includes(k.split('_').slice(-1)[0]));
+            console.log(`Available keys (first 10):`, allKeys.slice(0, 10));
+            console.log(`Looking for: ${key}`);
             if (matchingKeys.length > 0) {
-              console.log(`Found similar keys:`, matchingKeys.slice(0, 10));
-            } else {
-              console.log(`No similar keys found. Key format might be different.`);
+              console.log(`Found similar keys:`, matchingKeys.slice(0, 5));
             }
           };
           db.close();
@@ -441,8 +540,8 @@ async function getMediaFromIndexedDB(key) {
       };
       request.onerror = () => {
         console.error(`IndexedDB get error for key: ${key}`, request.error);
-        reject(request.error);
         db.close();
+        resolve(null);
       };
     });
   } catch (error) {
@@ -459,41 +558,34 @@ async function formatInstagramPostObj(post) {
 
   const { url, title, thumbnail, username, collectionIds, isVideo, videoUrl, timestamp } = post;
   
-  // URLs are now stored directly, but check for legacy IndexedDB keys for backward compatibility
-  let imageUrl = thumbnail;
-  let videoUrlFinal = videoUrl;
+  // Thumbnail is now stored as base64 data URL directly in the entity
+  // Check both 'thumbnail' and 'image' fields (for backwards compatibility)
+  let thumbnailValue = thumbnail || post.image;
   
-  // Backward compatibility: Check if thumbnail/videoUrl are IndexedDB keys
-  if (thumbnail && typeof thumbnail === 'string' && thumbnail.startsWith("idb:")) {
-    const dbKey = thumbnail.substring(4);
+  // Legacy: handle old IndexedDB keys
+  let imageUrl = thumbnailValue;
+  if (thumbnailValue && typeof thumbnailValue === 'string' && thumbnailValue.startsWith("idb:")) {
+    // Legacy IndexedDB key - try to retrieve
+    const dbKey = thumbnailValue.substring(4);
     const dataUrl = await getMediaFromIndexedDB(dbKey);
-    if (dataUrl) {
-      imageUrl = dataUrl;
-    } else {
-      // If IndexedDB retrieval fails, fallback to Instagram CDN or permalink
-      imageUrl = null;
-    }
+    imageUrl = dataUrl || null;
   }
   
-  if (videoUrl && typeof videoUrl === 'string' && videoUrl.startsWith("idb:")) {
-    const dbKey = videoUrl.substring(4);
-    const dataUrl = await getMediaFromIndexedDB(dbKey);
-    if (dataUrl) {
-      videoUrlFinal = dataUrl;
-    } else {
-      videoUrlFinal = null;
-    }
+  // For videos, videoUrl should be the permalink (url)
+  let videoUrlFinal = null;
+  if (isVideo) {
+    videoUrlFinal = url; // Always use permalink for videos
   }
   
   return {
     id: post.id || `${username}-${Date.now()}`,
     link: url,
-    image: imageUrl, // Direct CDN URL or data URL (for legacy)
+    image: imageUrl, // Base64 data URL or null
     title,
     username,
     collectionIds,
     isVideo,
-    videoUrl: videoUrlFinal, // Direct CDN URL or data URL (for legacy)
+    videoUrl: videoUrlFinal, // Permalink for videos (or null for photos)
     timestamp: timestamp || Date.now(),
   };
 }
@@ -502,60 +594,111 @@ async function debugIndexedDB() {
   try {
     const db = await openDB();
     return new Promise((resolve, reject) => {
-      const transaction = db.transaction([STORE_NAME], "readonly");
-      const store = transaction.objectStore(STORE_NAME);
-      const getAllRequest = store.getAllKeys();
+      // Get media store stats
+      const mediaTransaction = db.transaction([STORE_MEDIA], "readonly");
+      const mediaStore = mediaTransaction.objectStore(STORE_MEDIA);
+      const mediaKeysRequest = mediaStore.getAllKeys();
       
-      getAllRequest.onsuccess = async () => {
-        const keys = getAllRequest.result;
-        const stats = {
-          totalKeys: keys.length,
-          imageKeys: keys.filter(k => k.startsWith('img_')).length,
-          videoKeys: keys.filter(k => k.startsWith('vid_')).length,
-          keys: keys.slice(0, 100), // First 100 keys
-          sampleData: []
-        };
-        
-        // Get sample data for first 5 items
-        const sampleKeys = keys.slice(0, 5);
-        for (const key of sampleKeys) {
-          const getRequest = store.get(key);
-          getRequest.onsuccess = () => {
-            const blob = getRequest.result;
-            if (blob) {
-              stats.sampleData.push({
-                key: key,
-                type: blob.type,
-                size: blob.size,
-                sizeKB: (blob.size / 1024).toFixed(2)
-              });
-            }
-            
-            // When all samples are collected, resolve
-            if (stats.sampleData.length === sampleKeys.length) {
-              db.close();
-              resolve(stats);
-            }
-          };
-          getRequest.onerror = () => {
-            stats.sampleData.push({ key: key, error: 'Failed to retrieve' });
-            if (stats.sampleData.length === sampleKeys.length) {
-              db.close();
-              resolve(stats);
+      // Get posts
+      const postsTransaction = db.transaction([STORE_POSTS], "readonly");
+      const postsStore = postsTransaction.objectStore(STORE_POSTS);
+      const postsRequest = postsStore.get("all_posts");
+      
+      // Get collections
+      const collectionsTransaction = db.transaction([STORE_COLLECTIONS], "readonly");
+      const collectionsStore = collectionsTransaction.objectStore(STORE_COLLECTIONS);
+      const collectionsRequest = collectionsStore.get("all_collections");
+      
+      let mediaKeys = [];
+      let posts = [];
+      let collections = [];
+      let completed = 0;
+      
+      const checkComplete = () => {
+        completed++;
+        if (completed === 3) {
+          const mediaKeysArray = mediaKeys;
+          const stats = {
+            totalKeys: mediaKeysArray.length,
+            imageKeys: mediaKeysArray.filter(k => k.startsWith('img_')).length,
+            videoKeys: mediaKeysArray.filter(k => k.startsWith('vid_')).length,
+            keys: mediaKeysArray.slice(0, 100), // First 100 keys
+            sampleData: [],
+            posts: {
+              count: posts.length,
+              data: posts
+            },
+            collections: {
+              count: collections.length,
+              data: collections
             }
           };
-        }
-        
-        // If no keys, resolve immediately
-        if (keys.length === 0) {
-          db.close();
-          resolve(stats);
+          
+          // Get sample media data for first 5 items
+          const sampleKeys = mediaKeysArray.slice(0, 5);
+          if (sampleKeys.length === 0) {
+            db.close();
+            resolve(stats);
+            return;
+          }
+          
+          // Create a new transaction for getting sample data
+          const sampleTransaction = db.transaction([STORE_MEDIA], "readonly");
+          const sampleStore = sampleTransaction.objectStore(STORE_MEDIA);
+          
+          let samplesCollected = 0;
+          for (const key of sampleKeys) {
+            const getRequest = sampleStore.get(key);
+            getRequest.onsuccess = () => {
+              const blob = getRequest.result;
+              if (blob) {
+                stats.sampleData.push({
+                  key: key,
+                  type: blob.type,
+                  size: blob.size,
+                  sizeKB: (blob.size / 1024).toFixed(2)
+                });
+              }
+              samplesCollected++;
+              if (samplesCollected === sampleKeys.length) {
+                db.close();
+                resolve(stats);
+              }
+            };
+            getRequest.onerror = () => {
+              stats.sampleData.push({ key: key, error: 'Failed to retrieve' });
+              samplesCollected++;
+              if (samplesCollected === sampleKeys.length) {
+                db.close();
+                resolve(stats);
+              }
+            };
+          }
         }
       };
       
-      getAllRequest.onerror = () => {
-        db.close();
-        reject(getAllRequest.error);
+      mediaKeysRequest.onsuccess = () => {
+        mediaKeys = mediaKeysRequest.result;
+        checkComplete();
+      };
+      mediaKeysRequest.onerror = () => {
+        checkComplete();
+      };
+      
+      postsRequest.onsuccess = () => {
+        posts = postsRequest.result || [];
+        checkComplete();
+      };
+      postsRequest.onerror = () => {
+        checkComplete();
+      };
+      
+      collectionsRequest.onsuccess = () => {
+        collections = collectionsRequest.result || [];
+        checkComplete();
+      };
+      collectionsRequest.onerror = () => {
+        checkComplete();
       };
     });
   } catch (error) {

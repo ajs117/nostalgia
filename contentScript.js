@@ -493,6 +493,63 @@ async function fetchCollections() {
   return allCollections;
 }
 
+async function downloadAndCompressThumbnail(imageUrl, postId) {
+  try {
+    // Download the image
+    const response = await fetch(imageUrl, { mode: 'cors', credentials: 'omit' });
+    if (!response.ok) {
+      throw new Error(`Failed to download: ${response.status}`);
+    }
+    
+    const blob = await response.blob();
+    
+    // Create an image element to load and compress
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      
+      img.onload = () => {
+        // Create canvas for compression
+        const canvas = document.createElement('canvas');
+        const maxSize = 320;
+        const quality = 0.7;
+        
+        // Calculate new dimensions maintaining aspect ratio
+        let width = img.width;
+        let height = img.height;
+        if (width > height) {
+          if (width > maxSize) {
+            height = (height * maxSize) / width;
+            width = maxSize;
+          }
+        } else {
+          if (height > maxSize) {
+            width = (width * maxSize) / height;
+            height = maxSize;
+          }
+        }
+        
+        canvas.width = width;
+        canvas.height = height;
+        
+        // Draw and compress
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, width, height);
+        
+        // Convert directly to base64 data URL
+        const base64DataUrl = canvas.toDataURL('image/jpeg', quality);
+        resolve(base64DataUrl);
+      };
+      
+      img.onerror = () => reject(new Error('Failed to load image'));
+      img.src = URL.createObjectURL(blob);
+    });
+  } catch (error) {
+    console.error(`Error downloading/compressing thumbnail:`, error);
+    throw error;
+  }
+}
+
 async function getInstagramSavedPosts() {
   try {
     isSyncing = true;
@@ -536,25 +593,31 @@ async function getInstagramSavedPosts() {
           try {
             // Use permanent Instagram post URL (permalink)
             const url = `https://www.instagram.com/p/${post.code}/`;
+            const postId = post.id || `${post.user.username}-${post.code}`;
             
-            // Get the highest quality media URLs from Instagram's CDN
-            // These are the URLs Instagram uses for sharing and should be relatively persistent
+            // Get thumbnail URL
             const thumbnailUrl = post.image_versions2?.candidates?.[0]?.url || null;
-            const videoUrlRaw = post.media_type === 2 && post.video_versions?.length > 0 
-              ? post.video_versions[0]?.url 
-              : null;
             
-            // Just store the URLs directly - no blob downloads
-            // Instagram CDN URLs work for a long time, and we have the permalink as backup
+            // Download and compress thumbnail, convert to base64
+            let thumbnailBase64 = null;
+            if (thumbnailUrl) {
+              try {
+                thumbnailBase64 = await downloadAndCompressThumbnail(thumbnailUrl, postId);
+              } catch (thumbError) {
+                console.error(`Error processing thumbnail for ${postId}:`, thumbError);
+                // Continue without thumbnail
+              }
+            }
+            
             const element = {
-              id: post.id || `${post.user.username}-${post.code}`,
+              id: postId,
               url, // Permanent Instagram post permalink
-              thumbnail: thumbnailUrl, // Direct CDN URL - fetch on display
+              thumbnail: thumbnailBase64, // Base64 data URL stored directly
               title: post.caption?.text ?? `${post.user.username} post`,
               username: post.user.username,
               collectionIds: post.saved_collection_ids || [],
               isVideo: post.media_type === 2,
-              videoUrl: videoUrlRaw, // Direct CDN URL - fetch on display
+              videoUrl: null, // Don't store duplicate permalink, use url field instead
               timestamp: post.taken_at || Date.now(), // Store timestamp for sorting
             };
             

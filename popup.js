@@ -63,15 +63,18 @@ function loadStats() {
     }
   });
 
-  // Load collection count
-  chrome.storage.local.get(['instagramCollections'], (result) => {
-    let collections = [];
-    try {
-      collections = result.instagramCollections ? JSON.parse(result.instagramCollections) : [];
-    } catch (error) {
-      console.error('Error parsing collections:', error);
+  // Load collection count from IndexedDB
+  chrome.runtime.sendMessage({ action: 'GET_COLLECTIONS' }, (response) => {
+    if (chrome.runtime.lastError) {
+      console.error('Error loading collections:', chrome.runtime.lastError);
+      document.getElementById('total-collections').textContent = '0';
+      return;
     }
-    document.getElementById('total-collections').textContent = collections.length;
+    if (response && response.success) {
+      document.getElementById('total-collections').textContent = response.collections.length;
+    } else {
+      document.getElementById('total-collections').textContent = '0';
+    }
   });
 }
 
@@ -91,10 +94,8 @@ function handleClearStorage() {
       Clearing...
     `;
     
-    // Clear chrome.storage.local
-    chrome.storage.local.clear(() => {
-      // Clear IndexedDB
-      clearIndexedDB().then(() => {
+    // Clear IndexedDB (which now contains everything)
+    clearIndexedDB().then(() => {
         showStatus('Storage cleared successfully!', 'success');
         loadStats();
         
@@ -131,24 +132,57 @@ function clearIndexedDB() {
   return new Promise((resolve, reject) => {
     const DB_NAME = 'instagram_media_db';
     
-    const request = indexedDB.deleteDatabase(DB_NAME);
-    
-    request.onsuccess = () => {
-      console.log('IndexedDB cleared successfully');
+    // First, clear all data from stores, then delete database
+    const openRequest = indexedDB.open(DB_NAME);
+    openRequest.onsuccess = () => {
+      const db = openRequest.result;
+      const stores = ['media', 'posts', 'collections'];
+      let cleared = 0;
+      
+      stores.forEach(storeName => {
+        if (db.objectStoreNames.contains(storeName)) {
+          const transaction = db.transaction([storeName], 'readwrite');
+          const store = transaction.objectStore(storeName);
+          const clearRequest = store.clear();
+          clearRequest.onsuccess = () => {
+            cleared++;
+            if (cleared === stores.length) {
+              db.close();
+              // Now delete the database
+              const deleteRequest = indexedDB.deleteDatabase(DB_NAME);
+              deleteRequest.onsuccess = () => {
+                console.log('IndexedDB cleared successfully');
+                resolve();
+              };
+              deleteRequest.onerror = () => {
+                console.error('Error deleting IndexedDB:', deleteRequest.error);
+                reject(deleteRequest.error);
+              };
+            }
+          };
+          clearRequest.onerror = () => {
+            cleared++;
+            if (cleared === stores.length) {
+              db.close();
+              const deleteRequest = indexedDB.deleteDatabase(DB_NAME);
+              deleteRequest.onsuccess = () => resolve();
+              deleteRequest.onerror = () => reject(deleteRequest.error);
+            }
+          };
+        } else {
+          cleared++;
+          if (cleared === stores.length) {
+            db.close();
+            const deleteRequest = indexedDB.deleteDatabase(DB_NAME);
+            deleteRequest.onsuccess = () => resolve();
+            deleteRequest.onerror = () => reject(deleteRequest.error);
+          }
+        }
+      });
+    };
+    openRequest.onerror = () => {
+      // If DB doesn't exist, that's fine
       resolve();
-    };
-    
-    request.onerror = () => {
-      console.error('Error clearing IndexedDB:', request.error);
-      reject(request.error);
-    };
-    
-    request.onblocked = () => {
-      setTimeout(() => {
-        const retryRequest = indexedDB.deleteDatabase(DB_NAME);
-        retryRequest.onsuccess = () => resolve();
-        retryRequest.onerror = () => reject(retryRequest.error);
-      }, 1000);
     };
   });
 }

@@ -15,6 +15,7 @@
       <div class="header-controls">
         <button id="sync-btn" class="btn btn-primary">Sync with Instagram</button>
         <button id="clear-btn" class="btn btn-danger">Clear Storage</button>
+        <button id="db-info-btn" class="btn btn-secondary">DB Info</button>
         <div id="sync-status" class="sync-status"></div>
       </div>
     </header>
@@ -96,6 +97,22 @@
           <div class="modal-meta">
             <span id="modal-username"></span>
             <span id="modal-hashtags" class="hashtags"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal for DB Info -->
+    <div id="db-modal" class="modal">
+      <div class="modal-content db-modal-content">
+        <button class="modal-close" id="db-modal-close">&times;</button>
+        <div class="db-modal-header">
+          <h2>IndexedDB Information</h2>
+        </div>
+        <div id="db-info-content" class="db-info-content">
+          <div class="loading-placeholder">
+            <div class="spinner"></div>
+            <p>Loading database info...</p>
           </div>
         </div>
       </div>
