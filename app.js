@@ -769,11 +769,64 @@ function openModal(index) {
   // Clear previous content (this will also remove any remaining video elements)
   mediaContainer.innerHTML = '';
 
-  // Display image in modal (base64 data URL stored directly in post.image)
-  if (post.image && typeof post.image === 'string' && post.image.startsWith('data:')) {
+  // Handle videos differently - fetch CDN link from Instagram
+  if (post.isVideo) {
+    // Show loading state
+    mediaContainer.innerHTML = `
+      <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 40px; color: var(--text-secondary);">
+        <div class="spinner" style="margin-bottom: 20px;"></div>
+        <p>Loading video...</p>
+      </div>
+    `;
+    
+    console.log('Fetching video for post:', post.id, 'link:', post.link);
+    
+    if (!post.link) {
+      console.error('Post has no link field:', post);
+      mediaContainer.innerHTML = `
+        <p style="color: var(--error); padding: 20px;">Post has no link. Post data: ${JSON.stringify(post).substring(0, 200)}</p>
+      `;
+      return;
+    }
+    
+    // Request video CDN link from background script
+    chrome.runtime.sendMessage({
+      action: 'FETCH_VIDEO_CDN',
+      permalink: post.link,
+      postId: post.id
+    }, (response) => {
+      if (chrome.runtime.lastError) {
+        console.error('Error fetching video:', chrome.runtime.lastError);
+        mediaContainer.innerHTML = `
+          <p style="color: var(--error); padding: 20px;">Failed to load video. <a href="${post.link}" target="_blank" style="color: var(--accent);">View on Instagram</a></p>
+        `;
+        return;
+      }
+      
+      if (response && response.success && response.videoUrl) {
+        // Play the video
+        const video = createVideoElement(response.videoUrl, true);
+        video.controls = true;
+        video.style.maxHeight = '90vh';
+        video.style.maxWidth = '100%';
+        video.style.width = 'auto';
+        video.style.height = 'auto';
+        mediaContainer.innerHTML = '';
+        mediaContainer.appendChild(video);
+      } else {
+        // Failed to get video URL
+        const errorMsg = response?.error || 'Unknown error';
+        console.error('Failed to fetch video URL:', errorMsg);
+        mediaContainer.innerHTML = `
+          <p style="color: var(--error); padding: 20px;">Failed to load video: ${errorMsg}. <a href="${post.link}" target="_blank" style="color: var(--accent);">View on Instagram</a></p>
+        `;
+      }
+    });
+  } else if (post.image && typeof post.image === 'string' && post.image.startsWith('data:')) {
+    // Display image for photos
     const img = document.createElement('img');
     img.src = post.image;
-    img.alt = post.title || (post.isVideo ? 'Instagram video' : 'Instagram post');
+    img.alt = post.title || 'Instagram post';
     img.style.maxHeight = '70vh';
     img.style.width = 'auto';
     img.style.maxWidth = '100%';
@@ -784,20 +837,9 @@ function openModal(index) {
       mediaContainer.innerHTML = '<p style="color: var(--error); padding: 20px;">Image failed to load</p>';
     };
     mediaContainer.appendChild(img);
-    
-    // Add video indicator overlay if it's a video
-    if (post.isVideo) {
-      const videoIndicator = document.createElement('div');
-      videoIndicator.style.cssText = 'position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(0,0,0,0.7); color: white; padding: 12px 24px; border-radius: 8px; font-size: 18px; pointer-events: none; z-index: 10;';
-      videoIndicator.innerHTML = '▶ Video - Click to view on Instagram';
-      mediaContainer.appendChild(videoIndicator);
-    }
   } else {
     // No valid image - show message
-    const message = post.isVideo 
-      ? `<p style="color: var(--text-secondary); padding: 20px;">Video thumbnail not available. <a href="${post.videoUrl || post.link}" target="_blank" style="color: var(--accent);">View on Instagram</a></p>`
-      : '<p style="color: var(--text-secondary); padding: 20px;">Image not available</p>';
-    mediaContainer.innerHTML = message;
+    mediaContainer.innerHTML = '<p style="color: var(--text-secondary); padding: 20px;">Image not available</p>';
     console.warn(`Modal: Post ${post.id} has invalid image:`, post.image ? post.image.substring(0, 50) : 'null');
   }
 

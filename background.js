@@ -199,10 +199,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         if (!post || typeof post !== "object") {
           return null;
         }
+        // Use 'url' from incoming post (contentScript sends 'url')
         const { url, title, thumbnail, username, collectionIds, isVideo, videoUrl } = post;
+        
+        if (!url) {
+          console.warn('Post missing url field:', post.id || 'unknown');
+        }
+        
         return {
           id: post.id || `${username}-${Date.now()}`,
-          link: url,
+          link: url, // Store as 'link' for consistency
           thumbnail: thumbnail, // Store base64 data URL directly in thumbnail field
           title,
           username,
@@ -344,6 +350,156 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         console.error(`Error fetching thumbnail:`, error);
         sendResponse({ success: false, error: error.message });
       });
+    return true; // Async response
+  } else if (request.action === "FETCH_VIDEO_CDN") {
+    // Open Instagram post in hidden tab and extract video CDN link
+    try {
+      console.log('FETCH_VIDEO_CDN request:', request);
+      const { permalink, postId } = request;
+      
+      if (!permalink) {
+        console.error('No permalink in request. Request object:', JSON.stringify(request));
+        throw new Error(`No permalink provided. Request keys: ${Object.keys(request).join(', ')}`);
+      }
+      
+      // Create a hidden tab
+      chrome.tabs.create({
+        url: permalink,
+        active: false
+      }, (tab) => {
+        try {
+          if (chrome.runtime.lastError) {
+            throw new Error(`Failed to create tab: ${chrome.runtime.lastError.message}`);
+          }
+          
+          const tabId = tab.id;
+          let attempts = 0;
+          const maxAttempts = 20; // 10 seconds total (20 * 500ms)
+          
+          // Wait for page to load, then inject script to extract video
+          // Instagram is a SPA, so we need to wait for content to load
+          const checkTab = setInterval(() => {
+            try {
+              attempts++;
+              chrome.tabs.get(tabId, (tabInfo) => {
+                try {
+                  if (chrome.runtime.lastError) {
+                    clearInterval(checkTab);
+                    sendResponse({ success: false, error: `Tab error: ${chrome.runtime.lastError.message}` });
+                    return;
+                  }
+                  
+                  // Wait for page to be complete and give it extra time for dynamic content
+                  if (tabInfo.status === 'complete' && attempts >= 3) {
+                    clearInterval(checkTab);
+                    
+                    // Wait a bit more for Instagram's JS to load video
+                    setTimeout(() => {
+                      try {
+                        // First check if the page loaded correctly
+                        chrome.tabs.get(tabId, (tabInfo) => {
+                          if (chrome.runtime.lastError) {
+                            chrome.tabs.remove(tabId, () => {});
+                            sendResponse({ success: false, error: `Tab error: ${chrome.runtime.lastError.message}` });
+                            return;
+                          }
+                          
+                          // Check if URL is still Instagram and page is loaded
+                          if (!tabInfo.url || !tabInfo.url.includes('instagram.com')) {
+                            chrome.tabs.remove(tabId, () => {});
+                            sendResponse({ success: false, error: `Page redirected or not accessible: ${tabInfo.url}` });
+                            return;
+                          }
+                          
+                          // Check if page is showing an error (chrome://error or similar)
+                          if (tabInfo.url.startsWith('chrome://') || tabInfo.url.startsWith('chrome-error://')) {
+                            chrome.tabs.remove(tabId, () => {});
+                            sendResponse({ success: false, error: `Page error: ${tabInfo.url}` });
+                            return;
+                          }
+                          
+                          // Inject script to extract video URL
+                          chrome.scripting.executeScript({
+                            target: { tabId: tabId },
+                            func: extractVideoUrl
+                          }, (results) => {
+                            try {
+                              // Close the hidden tab
+                              chrome.tabs.remove(tabId, () => {
+                                // Ignore errors when closing
+                              });
+                              
+                              if (chrome.runtime.lastError) {
+                                const errorMsg = `Script injection error: ${chrome.runtime.lastError.message}`;
+                                console.error(errorMsg);
+                                sendResponse({ success: false, error: errorMsg });
+                                return;
+                              }
+                              
+                              if (!results || !results[0]) {
+                                const errorMsg = 'Failed to extract video URL - no results from script';
+                                console.error(errorMsg);
+                                sendResponse({ success: false, error: errorMsg });
+                                return;
+                              }
+                              
+                              const videoUrl = results[0].result;
+                              if (videoUrl) {
+                                console.log('Successfully extracted video URL:', videoUrl.substring(0, 100));
+                                sendResponse({ success: true, videoUrl });
+                              } else {
+                                const errorMsg = 'Video not found on page - extractVideoUrl returned null';
+                                console.error(errorMsg);
+                                sendResponse({ success: false, error: errorMsg });
+                              }
+                            } catch (error) {
+                              console.error('Error in script injection callback:', error);
+                              sendResponse({ success: false, error: `Script callback error: ${error.message}` });
+                            }
+                          });
+                        });
+                      } catch (error) {
+                        console.error('Error executing script:', error);
+                        chrome.tabs.remove(tabId, () => {});
+                        sendResponse({ success: false, error: `Script execution error: ${error.message}` });
+                      }
+                    }, 2000); // Wait 2 seconds for dynamic content
+                  }
+                } catch (error) {
+                  clearInterval(checkTab);
+                  console.error('Error in tab check:', error);
+                  chrome.tabs.remove(tabId, () => {});
+                  sendResponse({ success: false, error: `Tab check error: ${error.message}` });
+                }
+              });
+              
+              // Timeout after max attempts
+              if (attempts >= maxAttempts) {
+                clearInterval(checkTab);
+                chrome.tabs.get(tabId, () => {
+                  if (!chrome.runtime.lastError) {
+                    chrome.tabs.remove(tabId);
+                  }
+                });
+                sendResponse({ success: false, error: 'Timeout waiting for page to load' });
+              }
+            } catch (error) {
+              clearInterval(checkTab);
+              console.error('Error in checkTab interval:', error);
+              chrome.tabs.remove(tabId, () => {});
+              sendResponse({ success: false, error: `Interval error: ${error.message}` });
+            }
+          }, 500);
+        } catch (error) {
+          console.error('Error in tab creation callback:', error);
+          sendResponse({ success: false, error: `Tab creation callback error: ${error.message}` });
+        }
+      });
+    } catch (error) {
+      console.error('Error in FETCH_VIDEO_CDN handler:', error);
+      sendResponse({ success: false, error: `Handler error: ${error.message}` });
+    }
+    
     return true; // Async response
   } else if (request.action === "DEBUG_INDEXEDDB") {
     // Debug tool to inspect IndexedDB contents
@@ -556,7 +712,7 @@ async function formatInstagramPostObj(post) {
     return null;
   }
 
-  const { url, title, thumbnail, username, collectionIds, isVideo, videoUrl, timestamp } = post;
+  const { link, title, thumbnail, username, collectionIds, isVideo, videoUrl, timestamp } = post;
   
   // Thumbnail is now stored as base64 data URL directly in the entity
   // Check both 'thumbnail' and 'image' fields (for backwards compatibility)
@@ -571,15 +727,15 @@ async function formatInstagramPostObj(post) {
     imageUrl = dataUrl || null;
   }
   
-  // For videos, videoUrl should be the permalink (url)
+  // For videos, videoUrl should be the permalink (link)
   let videoUrlFinal = null;
   if (isVideo) {
-    videoUrlFinal = url; // Always use permalink for videos
+    videoUrlFinal = link; // Always use permalink for videos
   }
   
   return {
     id: post.id || `${username}-${Date.now()}`,
-    link: url,
+    link: link || null,
     image: imageUrl, // Base64 data URL or null
     title,
     username,
@@ -588,6 +744,111 @@ async function formatInstagramPostObj(post) {
     videoUrl: videoUrlFinal, // Permalink for videos (or null for photos)
     timestamp: timestamp || Date.now(),
   };
+}
+
+// Function to extract video URL from Instagram page (injected into page)
+function extractVideoUrl() {
+  // First, try to find video element directly
+  const videoSelectors = [
+    'video[src]',
+    'video source[src]',
+    'video',
+    '[role="presentation"] video',
+    'article video',
+    'main video',
+    'section video'
+  ];
+  
+  for (const selector of videoSelectors) {
+    const video = document.querySelector(selector);
+    if (video) {
+      // Try src attribute first
+      if (video.src && video.src.startsWith('http') && !video.src.includes('blob:')) {
+        return video.src;
+      }
+      
+      // Try source element
+      const source = video.querySelector('source');
+      if (source && source.src && source.src.startsWith('http')) {
+        return source.src;
+      }
+      
+      // Try currentSrc
+      if (video.currentSrc && video.currentSrc.startsWith('http') && !video.currentSrc.includes('blob:')) {
+        return video.currentSrc;
+      }
+    }
+  }
+  
+  // Try to find in window.__additionalDataLoaded (Instagram's data structure)
+  const findVideoUrl = (obj, depth = 0) => {
+    if (depth > 10) return null; // Prevent infinite recursion
+    if (typeof obj !== 'object' || obj === null) return null;
+    
+    // Check common video URL fields
+    if (obj.video_url && typeof obj.video_url === 'string' && obj.video_url.startsWith('http')) {
+      return obj.video_url;
+    }
+    if (obj.videoUrl && typeof obj.videoUrl === 'string' && obj.videoUrl.startsWith('http')) {
+      return obj.videoUrl;
+    }
+    if (obj.video_versions && Array.isArray(obj.video_versions) && obj.video_versions.length > 0) {
+      const videoVersion = obj.video_versions.find(v => v.url && v.url.startsWith('http'));
+      if (videoVersion) return videoVersion.url;
+    }
+    if (obj.video_versions && Array.isArray(obj.video_versions) && obj.video_versions[0]?.url) {
+      return obj.video_versions[0].url;
+    }
+    
+    // Recursively search
+    for (const key in obj) {
+      if (obj.hasOwnProperty(key)) {
+        const result = findVideoUrl(obj[key], depth + 1);
+        if (result) return result;
+      }
+    }
+    return null;
+  };
+  
+  // Check window.__additionalDataLoaded
+  if (window.__additionalDataLoaded) {
+    try {
+      const url = findVideoUrl(window.__additionalDataLoaded);
+      if (url) return url;
+    } catch (e) {
+      // Ignore errors
+    }
+  }
+  
+  // Check window._sharedData
+  if (window._sharedData) {
+    try {
+      const url = findVideoUrl(window._sharedData);
+      if (url) return url;
+    } catch (e) {
+      // Ignore errors
+    }
+  }
+  
+  // Check all script tags for JSON data
+  const scripts = document.querySelectorAll('script');
+  for (const script of scripts) {
+    if (script.textContent && script.textContent.includes('video')) {
+      try {
+        // Try to find JSON in script
+        const jsonMatch = script.textContent.match(/\{.*"video[^"]*"[^}]*\}/);
+        if (jsonMatch) {
+          const data = JSON.parse(jsonMatch[0]);
+          const url = findVideoUrl(data);
+          if (url) return url;
+        }
+      } catch (e) {
+        // Ignore parse errors
+      }
+    }
+  }
+  
+  return null;
 }
 
 async function debugIndexedDB() {
