@@ -362,17 +362,65 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         throw new Error(`No permalink provided. Request keys: ${Object.keys(request).join(', ')}`);
       }
       
-      // Create a hidden tab
-      chrome.tabs.create({
-        url: permalink,
-        active: false
-      }, (tab) => {
-        try {
+      // Track if response has been sent to prevent multiple calls
+      let responseSent = false;
+      const safeSendResponse = (response) => {
+        if (!responseSent) {
+          responseSent = true;
+          sendResponse(response);
+        }
+      };
+      
+      // Helper to check if tab exists before operations
+      const checkTabExists = (tabId, callback) => {
+        chrome.tabs.get(tabId, (tab) => {
           if (chrome.runtime.lastError) {
-            throw new Error(`Failed to create tab: ${chrome.runtime.lastError.message}`);
+            callback(null, chrome.runtime.lastError.message);
+          } else {
+            callback(tab, null);
           }
-          
-          const tabId = tab.id;
+        });
+      };
+      
+      // First, check if there's already an Instagram tab open we can use
+      chrome.tabs.query({ url: '*://www.instagram.com/*' }, (existingTabs) => {
+        let tabId = null;
+        let shouldCloseTab = false;
+        
+        if (existingTabs && existingTabs.length > 0) {
+          // Use existing Instagram tab
+          tabId = existingTabs[0].id;
+          console.log('Using existing Instagram tab:', tabId);
+          // Navigate existing tab to the post
+          chrome.tabs.update(tabId, { url: permalink, active: false }, (updatedTab) => {
+            if (chrome.runtime.lastError) {
+              // If update fails, create new tab
+              createNewTab();
+            } else {
+              processTab(updatedTab.id, false);
+            }
+          });
+        } else {
+          // Create a new hidden tab
+          createNewTab();
+        }
+        
+        function createNewTab() {
+          chrome.tabs.create({
+            url: permalink,
+            active: false  // Hidden tab
+          }, (tab) => {
+            if (chrome.runtime.lastError) {
+              safeSendResponse({ success: false, error: `Failed to create tab: ${chrome.runtime.lastError.message}` });
+              return;
+            }
+            shouldCloseTab = true;
+            processTab(tab.id, true);
+          });
+        }
+        
+        function processTab(tabId, isNewTab) {
+          try {
           let attempts = 0;
           const maxAttempts = 20; // 10 seconds total (20 * 500ms)
           
@@ -381,118 +429,195 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           const checkTab = setInterval(() => {
             try {
               attempts++;
-              chrome.tabs.get(tabId, (tabInfo) => {
+              checkTabExists(tabId, (tabInfo, error) => {
                 try {
-                  if (chrome.runtime.lastError) {
+                  if (error) {
                     clearInterval(checkTab);
-                    sendResponse({ success: false, error: `Tab error: ${chrome.runtime.lastError.message}` });
+                    safeSendResponse({ success: false, error: `Tab error: ${error}` });
                     return;
                   }
                   
                   // Wait for page to be complete and give it extra time for dynamic content
-                  if (tabInfo.status === 'complete' && attempts >= 3) {
+                  // Need at least 5 attempts (2.5 seconds) to ensure page is ready
+                  if (tabInfo.status === 'complete' && attempts >= 5) {
                     clearInterval(checkTab);
                     
                     // Wait a bit more for Instagram's JS to load video
                     setTimeout(() => {
                       try {
                         // First check if the page loaded correctly
-                        chrome.tabs.get(tabId, (tabInfo) => {
-                          if (chrome.runtime.lastError) {
-                            chrome.tabs.remove(tabId, () => {});
-                            sendResponse({ success: false, error: `Tab error: ${chrome.runtime.lastError.message}` });
+                        checkTabExists(tabId, (tabInfo, error) => {
+                          if (error) {
+                            if (shouldCloseTab) chrome.tabs.remove(tabId, () => {});
+                            safeSendResponse({ success: false, error: `Tab error: ${error}` });
                             return;
                           }
                           
                           // Check if URL is still Instagram and page is loaded
                           if (!tabInfo.url || !tabInfo.url.includes('instagram.com')) {
-                            chrome.tabs.remove(tabId, () => {});
-                            sendResponse({ success: false, error: `Page redirected or not accessible: ${tabInfo.url}` });
+                            if (shouldCloseTab) chrome.tabs.remove(tabId, () => {});
+                            safeSendResponse({ success: false, error: `Page redirected or not accessible: ${tabInfo.url}` });
                             return;
                           }
                           
                           // Check if page is showing an error (chrome://error or similar)
-                          if (tabInfo.url.startsWith('chrome://') || tabInfo.url.startsWith('chrome-error://')) {
-                            chrome.tabs.remove(tabId, () => {});
-                            sendResponse({ success: false, error: `Page error: ${tabInfo.url}` });
+                          if (tabInfo.url.startsWith('chrome://') || tabInfo.url.startsWith('chrome-error://') || tabInfo.url.startsWith('edge://')) {
+                            if (shouldCloseTab) chrome.tabs.remove(tabId, () => {});
+                            safeSendResponse({ success: false, error: `Page error: ${tabInfo.url}` });
                             return;
                           }
                           
-                          // Inject script to extract video URL
+                          // Check if redirected to login page or other non-post page
+                          if (tabInfo.url && !tabInfo.url.includes('/p/') && !tabInfo.url.includes('/reel/')) {
+                            if (shouldCloseTab) chrome.tabs.remove(tabId, () => {});
+                            safeSendResponse({ success: false, error: `Page redirected to: ${tabInfo.url}` });
+                            return;
+                          }
+                          
+                          // Verify the page is actually loaded and ready
+                          if (tabInfo.status !== 'complete') {
+                            if (shouldCloseTab) chrome.tabs.remove(tabId, () => {});
+                            safeSendResponse({ success: false, error: `Page not fully loaded. Status: ${tabInfo.status}` });
+                            return;
+                          }
+                          
+                          // First, try a simple test injection to verify the page is accessible
+                          // This helps catch error pages before trying the full extraction
                           chrome.scripting.executeScript({
-                            target: { tabId: tabId },
-                            func: extractVideoUrl
-                          }, (results) => {
+                            target: { tabId: tabId, allFrames: false },
+                            func: () => {
+                              // Simple test - just check if we're on a valid page
+                              if (document.readyState !== 'complete') {
+                                return { error: 'Page not ready' };
+                              }
+                              if (window.location.href.includes('chrome-error://') || 
+                                  window.location.href.includes('edge-error://') ||
+                                  window.location.href.includes('chrome://') ||
+                                  window.location.href.includes('edge://')) {
+                                return { error: 'Error page detected' };
+                              }
+                              return { ready: true };
+                            }
+                          }, (testResults) => {
+                            if (chrome.runtime.lastError) {
+                              const errorMsg = `Page not accessible: ${chrome.runtime.lastError.message}`;
+                              console.error(errorMsg);
+                              if (shouldCloseTab) chrome.tabs.remove(tabId, () => {});
+                              safeSendResponse({ success: false, error: errorMsg });
+                              return;
+                            }
+                            
+                            if (!testResults || !testResults[0] || testResults[0].result?.error) {
+                              const errorMsg = testResults?.[0]?.result?.error || 'Page validation failed';
+                              console.error(errorMsg);
+                              if (shouldCloseTab) {
+                                chrome.tabs.remove(tabId, () => {});
+                              }
+                              safeSendResponse({ success: false, error: errorMsg });
+                              return;
+                            }
+                            
+                            // Page is accessible, now do the actual extraction
+                            chrome.scripting.executeScript({
+                              target: { tabId: tabId, allFrames: false },
+                              func: extractFromRenderedPage
+                            }, (results) => {
                             try {
-                              // Close the hidden tab
-                              chrome.tabs.remove(tabId, () => {
-                                // Ignore errors when closing
-                              });
-                              
+                              // Check for errors BEFORE accessing results
                               if (chrome.runtime.lastError) {
                                 const errorMsg = `Script injection error: ${chrome.runtime.lastError.message}`;
                                 console.error(errorMsg);
-                                sendResponse({ success: false, error: errorMsg });
+                                if (shouldCloseTab) {
+                                  chrome.tabs.remove(tabId, () => {});
+                                }
+                                safeSendResponse({ success: false, error: errorMsg });
                                 return;
+                              }
+                              
+                              // Close the tab only if we created it (not if we used existing tab)
+                              if (shouldCloseTab) {
+                                chrome.tabs.remove(tabId, () => {
+                                  // Ignore errors when closing
+                                });
                               }
                               
                               if (!results || !results[0]) {
                                 const errorMsg = 'Failed to extract video URL - no results from script';
                                 console.error(errorMsg);
-                                sendResponse({ success: false, error: errorMsg });
+                                safeSendResponse({ success: false, error: errorMsg });
                                 return;
                               }
                               
-                              const videoUrl = results[0].result;
-                              if (videoUrl) {
-                                console.log('Successfully extracted video URL:', videoUrl.substring(0, 100));
-                                sendResponse({ success: true, videoUrl });
+                              const extracted = results[0].result;
+                              
+                              // Log page dump if available
+                              if (extracted && extracted.pageDump) {
+                                console.log('=== PAGE DUMP FROM INSTAGRAM TAB ===');
+                                console.log('URL:', extracted.pageDump.url);
+                                console.log('Videos found:', extracted.pageDump.videos.length);
+                                console.log('Images found:', extracted.pageDump.images.length);
+                                console.log('Scripts with video:', extracted.pageDump.scripts.length);
+                                console.log('Full page dump:', extracted.pageDump);
+                                console.log('=== END PAGE DUMP ===');
+                              }
+                              
+                              if (extracted && extracted.videoUrl) {
+                                console.log('Successfully extracted video URL:', extracted.videoUrl.substring(0, 100));
+                                safeSendResponse({ success: true, videoUrl: extracted.videoUrl });
                               } else {
-                                const errorMsg = 'Video not found on page - extractVideoUrl returned null';
+                                const errorMsg = extracted?.error || 'Video not found on page';
                                 console.error(errorMsg);
-                                sendResponse({ success: false, error: errorMsg });
+                                if (extracted?.pageDump) {
+                                  console.error('Page dump available for debugging:', extracted.pageDump);
+                                }
+                                safeSendResponse({ success: false, error: errorMsg, pageDump: extracted?.pageDump });
                               }
                             } catch (error) {
                               console.error('Error in script injection callback:', error);
-                              sendResponse({ success: false, error: `Script callback error: ${error.message}` });
+                              safeSendResponse({ success: false, error: `Script callback error: ${error.message}` });
                             }
+                            });
                           });
                         });
                       } catch (error) {
                         console.error('Error executing script:', error);
-                        chrome.tabs.remove(tabId, () => {});
-                        sendResponse({ success: false, error: `Script execution error: ${error.message}` });
+                        if (shouldCloseTab) chrome.tabs.remove(tabId, () => {});
+                        safeSendResponse({ success: false, error: `Script execution error: ${error.message}` });
                       }
-                    }, 2000); // Wait 2 seconds for dynamic content
+                    }, 3000); // Wait 3 seconds for dynamic content to load
                   }
                 } catch (error) {
                   clearInterval(checkTab);
                   console.error('Error in tab check:', error);
-                  chrome.tabs.remove(tabId, () => {});
-                  sendResponse({ success: false, error: `Tab check error: ${error.message}` });
+                  if (shouldCloseTab) chrome.tabs.remove(tabId, () => {});
+                  safeSendResponse({ success: false, error: `Tab check error: ${error.message}` });
                 }
               });
               
               // Timeout after max attempts
               if (attempts >= maxAttempts) {
                 clearInterval(checkTab);
-                chrome.tabs.get(tabId, () => {
-                  if (!chrome.runtime.lastError) {
-                    chrome.tabs.remove(tabId);
-                  }
-                });
-                sendResponse({ success: false, error: 'Timeout waiting for page to load' });
+                if (shouldCloseTab) {
+                  checkTabExists(tabId, (tab, error) => {
+                    if (!error) {
+                      chrome.tabs.remove(tabId);
+                    }
+                  });
+                }
+                safeSendResponse({ success: false, error: 'Timeout waiting for page to load' });
               }
             } catch (error) {
               clearInterval(checkTab);
               console.error('Error in checkTab interval:', error);
-              chrome.tabs.remove(tabId, () => {});
-              sendResponse({ success: false, error: `Interval error: ${error.message}` });
+              if (shouldCloseTab) chrome.tabs.remove(tabId, () => {});
+              safeSendResponse({ success: false, error: `Interval error: ${error.message}` });
             }
           }, 500);
-        } catch (error) {
-          console.error('Error in tab creation callback:', error);
-          sendResponse({ success: false, error: `Tab creation callback error: ${error.message}` });
+          } catch (error) {
+            console.error('Error in processTab:', error);
+            if (shouldCloseTab) chrome.tabs.remove(tabId, () => {});
+            safeSendResponse({ success: false, error: `Process tab error: ${error.message}` });
+          }
         }
       });
     } catch (error) {
@@ -747,108 +872,345 @@ async function formatInstagramPostObj(post) {
 }
 
 // Function to extract video URL from Instagram page (injected into page)
-function extractVideoUrl() {
-  // First, try to find video element directly
-  const videoSelectors = [
-    'video[src]',
-    'video source[src]',
-    'video',
-    '[role="presentation"] video',
-    'article video',
-    'main video',
-    'section video'
-  ];
-  
-  for (const selector of videoSelectors) {
-    const video = document.querySelector(selector);
-    if (video) {
-      // Try src attribute first
-      if (video.src && video.src.startsWith('http') && !video.src.includes('blob:')) {
-        return video.src;
+// Extract video and media info from rendered Instagram page
+function extractFromRenderedPage() {
+  try {
+    // DUMP PAGE DATA FOR DEBUGGING
+    const pageDump = {
+      url: window.location.href,
+      readyState: document.readyState,
+      title: document.title,
+      videos: [],
+      images: [],
+      scripts: [],
+      windowData: {},
+      htmlSnippet: document.documentElement.outerHTML.substring(0, 50000) // First 50KB
+    };
+    
+    // First, try to find video element directly
+    const videoSelectors = [
+      'video[src]',
+      'video source[src]',
+      'video',
+      '[role="presentation"] video',
+      'article video',
+      'main video',
+      'section video'
+    ];
+    
+    let videoUrl = null;
+    let imageUrl = null;
+    let username = null;
+    let caption = null;
+    
+    // Collect all video elements
+    for (const selector of videoSelectors) {
+      const videos = document.querySelectorAll(selector);
+      videos.forEach((video, idx) => {
+        const videoInfo = {
+          selector: selector,
+          index: idx,
+          src: video.src || null,
+          currentSrc: video.currentSrc || null,
+          poster: video.poster || null,
+          tagName: video.tagName,
+          className: video.className,
+          id: video.id || null,
+          parentTag: video.parentElement?.tagName || null,
+          parentClass: video.parentElement?.className || null
+        };
+        
+        // Check for source element
+        const source = video.querySelector('source');
+        if (source) {
+          videoInfo.sourceSrc = source.src || null;
+          videoInfo.sourceType = source.type || null;
+        }
+        
+        pageDump.videos.push(videoInfo);
+        
+        // Try to extract URL
+        if (!videoUrl) {
+          if (video.src && video.src.startsWith('http') && !video.src.includes('blob:')) {
+            videoUrl = video.src;
+          } else if (source && source.src && source.src.startsWith('http')) {
+            videoUrl = source.src;
+          } else if (video.currentSrc && video.currentSrc.startsWith('http') && !video.currentSrc.includes('blob:')) {
+            videoUrl = video.currentSrc;
+          }
+        }
+      });
+    }
+    
+    // Try to find image as fallback
+    const imageSelectors = [
+      'article img[src*="cdninstagram"]',
+      'img[src*="cdninstagram"]',
+      'article img',
+      'main img'
+    ];
+    
+    // Collect all image elements
+    for (const selector of imageSelectors) {
+      const images = document.querySelectorAll(selector);
+      images.forEach((img, idx) => {
+        if (img.src && img.src.startsWith('http') && !img.src.includes('blob:')) {
+          pageDump.images.push({
+            selector: selector,
+            index: idx,
+            src: img.src,
+            alt: img.alt || null,
+            className: img.className,
+            parentTag: img.parentElement?.tagName || null
+          });
+          
+          if (!imageUrl) {
+            imageUrl = img.src;
+          }
+        }
+      });
+    }
+    
+    // Extract username from page
+    const usernameEl = document.querySelector('header a[href*="/"]') || 
+                       document.querySelector('a[href*="/"][role="link"]');
+    if (usernameEl) {
+      const href = usernameEl.getAttribute('href');
+      if (href) {
+        const match = href.match(/instagram\.com\/([^\/\?]+)/);
+        if (match) username = match[1];
+      }
+    }
+    
+    // Extract caption
+    const captionEl = document.querySelector('article span') || 
+                      document.querySelector('[data-testid]');
+    if (captionEl) {
+      caption = captionEl.textContent || '';
+    }
+    
+    // Try to find in window data structures
+    const findVideoUrl = (obj, depth = 0) => {
+      if (depth > 10) return null;
+      if (typeof obj !== 'object' || obj === null) return null;
+      
+      if (obj.video_url && typeof obj.video_url === 'string' && obj.video_url.startsWith('http')) {
+        return obj.video_url;
+      }
+      if (obj.videoUrl && typeof obj.videoUrl === 'string' && obj.videoUrl.startsWith('http')) {
+        return obj.videoUrl;
+      }
+      if (obj.video_versions && Array.isArray(obj.video_versions) && obj.video_versions.length > 0) {
+        const videoVersion = obj.video_versions.find(v => v.url && v.url.startsWith('http'));
+        if (videoVersion) return videoVersion.url;
+        if (obj.video_versions[0]?.url) return obj.video_versions[0].url;
       }
       
-      // Try source element
-      const source = video.querySelector('source');
-      if (source && source.src && source.src.startsWith('http')) {
-        return source.src;
+      for (const key in obj) {
+        if (obj.hasOwnProperty(key)) {
+          const result = findVideoUrl(obj[key], depth + 1);
+          if (result) return result;
+        }
       }
-      
-      // Try currentSrc
-      if (video.currentSrc && video.currentSrc.startsWith('http') && !video.currentSrc.includes('blob:')) {
-        return video.currentSrc;
-      }
-    }
-  }
-  
-  // Try to find in window.__additionalDataLoaded (Instagram's data structure)
-  const findVideoUrl = (obj, depth = 0) => {
-    if (depth > 10) return null; // Prevent infinite recursion
-    if (typeof obj !== 'object' || obj === null) return null;
+      return null;
+    };
     
-    // Check common video URL fields
-    if (obj.video_url && typeof obj.video_url === 'string' && obj.video_url.startsWith('http')) {
-      return obj.video_url;
-    }
-    if (obj.videoUrl && typeof obj.videoUrl === 'string' && obj.videoUrl.startsWith('http')) {
-      return obj.videoUrl;
-    }
-    if (obj.video_versions && Array.isArray(obj.video_versions) && obj.video_versions.length > 0) {
-      const videoVersion = obj.video_versions.find(v => v.url && v.url.startsWith('http'));
-      if (videoVersion) return videoVersion.url;
-    }
-    if (obj.video_versions && Array.isArray(obj.video_versions) && obj.video_versions[0]?.url) {
-      return obj.video_versions[0].url;
-    }
-    
-    // Recursively search
-    for (const key in obj) {
-      if (obj.hasOwnProperty(key)) {
-        const result = findVideoUrl(obj[key], depth + 1);
-        if (result) return result;
-      }
-    }
-    return null;
-  };
-  
-  // Check window.__additionalDataLoaded
-  if (window.__additionalDataLoaded) {
-    try {
-      const url = findVideoUrl(window.__additionalDataLoaded);
-      if (url) return url;
-    } catch (e) {
-      // Ignore errors
-    }
-  }
-  
-  // Check window._sharedData
-  if (window._sharedData) {
-    try {
-      const url = findVideoUrl(window._sharedData);
-      if (url) return url;
-    } catch (e) {
-      // Ignore errors
-    }
-  }
-  
-  // Check all script tags for JSON data
-  const scripts = document.querySelectorAll('script');
-  for (const script of scripts) {
-    if (script.textContent && script.textContent.includes('video')) {
+    // Check window data and dump it
+    if (window.__additionalDataLoaded) {
       try {
-        // Try to find JSON in script
-        const jsonMatch = script.textContent.match(/\{.*"video[^"]*"[^}]*\}/);
-        if (jsonMatch) {
-          const data = JSON.parse(jsonMatch[0]);
-          const url = findVideoUrl(data);
-          if (url) return url;
+        pageDump.windowData.__additionalDataLoaded = JSON.stringify(window.__additionalDataLoaded).substring(0, 10000);
+        if (!videoUrl) {
+          videoUrl = findVideoUrl(window.__additionalDataLoaded);
         }
       } catch (e) {
-        // Ignore parse errors
+        pageDump.windowData.__additionalDataLoaded = 'Error serializing: ' + e.message;
       }
     }
+    
+    if (window._sharedData) {
+      try {
+        pageDump.windowData._sharedData = JSON.stringify(window._sharedData).substring(0, 10000);
+        if (!videoUrl) {
+          videoUrl = findVideoUrl(window._sharedData);
+        }
+      } catch (e) {
+        pageDump.windowData._sharedData = 'Error serializing: ' + e.message;
+      }
+    }
+    
+    // Check script tags for JSON data
+    const scripts = document.querySelectorAll('script');
+    for (const script of scripts) {
+      const text = script.textContent || '';
+      if (text.includes('video') || text.includes('Video') || text.includes('VIDEO') || text.includes('video_versions')) {
+        pageDump.scripts.push({
+          type: script.type || 'text/javascript',
+          hasVideo: true,
+          length: text.length,
+          preview: text.substring(0, 500)
+        });
+        
+        if (!videoUrl) {
+          try {
+            // First, try to parse the entire script as JSON (for application/json scripts)
+            if (script.type === 'application/json' || text.trim().startsWith('{')) {
+              try {
+                const fullData = JSON.parse(text);
+                const found = findVideoUrl(fullData);
+                if (found) {
+                  videoUrl = found;
+                  continue;
+                }
+              } catch (e) {
+                // Not valid JSON, continue with other methods
+              }
+            }
+            
+            // Look for video_versions array specifically - this is the most reliable method
+            if (!videoUrl && text.includes('video_versions')) {
+              // Find the position of "video_versions"
+              const videoVersionsPos = text.indexOf('"video_versions"');
+              if (videoVersionsPos !== -1) {
+                // Look for "url" field after video_versions (within reasonable distance)
+                const searchStart = videoVersionsPos;
+                const searchEnd = Math.min(text.length, videoVersionsPos + 2000); // Search up to 2000 chars ahead
+                const searchText = text.substring(searchStart, searchEnd);
+                
+                // Try multiple patterns to find the URL
+                const urlPatterns = [
+                  // Pattern: "url":"https:\/\/..." (with escaped slashes)
+                  /"url"\s*:\s*"(https?:\\?\/\\?\/[^"]+)"/,
+                  // Pattern: "url":"https://..." (without escaped slashes)
+                  /"url"\s*:\s*"(https?:\/\/[^"]+)"/,
+                  // Pattern: "url":"https..." (more flexible)
+                  /"url"\s*:\s*"(https?[^"]+)"/,
+                ];
+                
+                for (const pattern of urlPatterns) {
+                  const match = searchText.match(pattern);
+                  if (match && match[1]) {
+                    let potentialUrl = match[1];
+                    // Unescape JSON escape sequences
+                    potentialUrl = potentialUrl.replace(/\\\//g, '/');
+                    potentialUrl = potentialUrl.replace(/\\"/g, '"');
+                    potentialUrl = potentialUrl.replace(/\\\\/g, '\\');
+                    
+                    // Check if it's a valid HTTP URL
+                    if (potentialUrl.startsWith('http://') || potentialUrl.startsWith('https://')) {
+                      // Make sure it's from Instagram CDN
+                      if (potentialUrl.includes('cdninstagram.com') || potentialUrl.includes('fbcdn.net') || potentialUrl.includes('scontent')) {
+                        videoUrl = potentialUrl;
+                        break;
+                      }
+                    }
+                  }
+                }
+              }
+              
+              // If regex didn't work, try to find and parse JSON structure containing video_versions
+              if (!videoUrl) {
+                // Find the position of video_versions
+                const videoVersionsIndex = text.indexOf('"video_versions"');
+                if (videoVersionsIndex !== -1) {
+                  // Try to find the containing JSON object by looking backwards for opening brace
+                  let startIdx = videoVersionsIndex;
+                  let braceCount = 0;
+                  let foundStart = false;
+                  
+                  // Look backwards for the start of the object
+                  for (let i = videoVersionsIndex; i >= 0 && i >= videoVersionsIndex - 5000; i--) {
+                    if (text[i] === '}') {
+                      braceCount++;
+                    } else if (text[i] === '{') {
+                      if (braceCount === 0) {
+                        startIdx = i;
+                        foundStart = true;
+                        break;
+                      }
+                      braceCount--;
+                    }
+                  }
+                  
+                  // Look forwards for the end of the object
+                  if (foundStart) {
+                    braceCount = 0;
+                    let endIdx = startIdx;
+                    for (let i = startIdx; i < text.length && i < startIdx + 10000; i++) {
+                      if (text[i] === '{') {
+                        braceCount++;
+                      } else if (text[i] === '}') {
+                        braceCount--;
+                        if (braceCount === 0) {
+                          endIdx = i;
+                          break;
+                        }
+                      }
+                    }
+                    
+                    // Try to parse the extracted JSON
+                    if (endIdx > startIdx) {
+                      try {
+                        const jsonStr = text.substring(startIdx, endIdx + 1);
+                        const data = JSON.parse(jsonStr);
+                        const found = findVideoUrl(data);
+                        if (found) {
+                          videoUrl = found;
+                        }
+                      } catch (e) {
+                        // JSON parsing failed, continue
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            
+            // Try to find JSON with video data (original method as fallback)
+            if (!videoUrl && text.includes('video')) {
+              const jsonMatches = text.match(/\{[^{}]*"video[^"]*"[^{}]*\}/g);
+              if (jsonMatches) {
+                for (const match of jsonMatches) {
+                  try {
+                    const data = JSON.parse(match);
+                    const found = findVideoUrl(data);
+                    if (found) {
+                      videoUrl = found;
+                      break;
+                    }
+                  } catch (e) {}
+                }
+              }
+            }
+          } catch (e) {
+            console.error('Error parsing script for video URL:', e);
+          }
+        }
+      }
+    }
+    
+    // Log the dump to console
+    console.log('=== INSTAGRAM PAGE DUMP ===');
+    console.log('URL:', pageDump.url);
+    console.log('Ready State:', pageDump.readyState);
+    console.log('Videos found:', pageDump.videos.length);
+    console.log('Videos:', pageDump.videos);
+    console.log('Images found:', pageDump.images.length);
+    console.log('Images:', pageDump.images);
+    console.log('Scripts with video:', pageDump.scripts.length);
+    console.log('Scripts:', pageDump.scripts);
+    console.log('Window Data:', pageDump.windowData);
+    console.log('HTML Snippet (first 50KB):', pageDump.htmlSnippet);
+    console.log('=== END DUMP ===');
+    
+    // Also return the dump in the response
+    if (videoUrl) {
+      return { videoUrl, imageUrl, username, caption, pageDump };
+    } else {
+      return { error: 'Video URL not found on page', pageDump };
+    }
+  } catch (error) {
+    return { error: `Extraction error: ${error.message}`, stack: error.stack };
   }
-  
-  return null;
 }
 
 async function debugIndexedDB() {
