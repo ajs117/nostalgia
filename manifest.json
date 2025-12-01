@@ -1,11 +1,11 @@
 {
    "action": {
       "default_icon": {
-         "128": "logo192.png",
-         "16": "logo192.png",
-         "48": "logo192.png"
+         "128": "logo128.png",
+         "16": "logo16.png",
+         "48": "logo48.png"
       },
-      "default_title": "Instagram Saved Posts"
+      "default_title": "Nostalgia"
    },
    "background": {
       "service_worker": "background.js"
@@ -14,19 +14,19 @@
       "js": [ "contentScript.js" ],
       "matches": [ "https://www.instagram.com/*" ]
    } ],
-   "description": "View and manage your Instagram saved posts",
+   "description": "Sync and organize your Instagram saved posts offline. All data stored locally.",
    "host_permissions": [ "https://*.instagram.com/*", "https://*.fbcdn.net/*" ],
    "icons": {
-      "128": "logo192.png",
-      "16": "logo192.png",
-      "48": "logo192.png"
+      "128": "logo128.png",
+      "16": "logo16.png",
+      "48": "logo48.png",
+      "192": "logo192.png",
+      "512": "logo512.png"
    },
-   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArCqrI/4ZNodVf+SpNXkduD5f5Xswyo5zTBd4fqlyIKtwwBB5XmB9K8peuasH3/SDOKnKj5Nq9lDBek+E+33mGj5ibuzBRy1BMQeTfGcK76g55NMzm90+MsK0m7gL5NIji0vrc0vekFB1RfQCWxrkKKM4A8hp+qiNLKEuIU7f9fVU6HIVSFe5/CUIuKgyBzY35j5RId1uZBEOpNhSSK6Cj84UwxMW6CitaGpdtrJQwVSRBXDSLsfU/mCpJfwh1emlRNdnhyWW/o5PABNPRuK8DbzjxLkzRNQUu6QdrVKlKQhCWEvFtvo7RDd8OUnG21QO3O2lANzspYJ3Qzke6MFRSwIDAQAB",
    "manifest_version": 3,
-   "name": "savethegram",
+   "name": "nostalgia",
    "permissions": [ "storage", "scripting", "tabs" ],
-   "update_url": "https://clients2.google.com/service/update2/crx",
-   "version": "1.7",
+   "version": "1.0",
    "web_accessible_resources": [ {
       "matches": [ "\u003Call_urls>" ],
       "resources": [ "index.html" ]

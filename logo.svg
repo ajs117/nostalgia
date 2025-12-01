@@ -1,0 +1,45 @@
+<svg width="192" height="192" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- Reversed Instagram gradient: blue → purple → pink → orange → yellow -->
+    <linearGradient id="instagramGradient" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#4f5bd5;stop-opacity:1" />
+      <stop offset="20%" style="stop-color:#962fbf;stop-opacity:1" />
+      <stop offset="40%" style="stop-color:#d62976;stop-opacity:1" />
+      <stop offset="60%" style="stop-color:#fa7e1e;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#feda75;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="innerGlow" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#4f5bd5;stop-opacity:0.3" />
+      <stop offset="100%" style="stop-color:#feda75;stop-opacity:0.1" />
+    </linearGradient>
+  </defs>
+
+  <!-- Background with reversed Instagram gradient -->
+  <rect x="8" y="8" width="176" height="176" rx="44" fill="url(#instagramGradient)"/>
+
+  <!-- Clock face circle -->
+  <circle cx="96" cy="96" r="56" fill="none" stroke="white" stroke-width="10"/>
+
+  <!-- Hour markers -->
+  <line x1="96" y1="40" x2="96" y2="48" stroke="white" stroke-width="4"/>
+  <line x1="96" y1="144" x2="96" y2="136" stroke="white" stroke-width="4"/>
+  <line x1="152" y1="96" x2="144" y2="96" stroke="white" stroke-width="4"/>
+  <line x1="40" y1="96" x2="48" y2="96" stroke="white" stroke-width="4"/>
+
+  <!-- Minute markers -->
+  <line x1="96" y1="32" x2="96" y2="40" stroke="white" stroke-width="2"/>
+  <line x1="96" y1="152" x2="96" y2="160" stroke="white" stroke-width="2"/>
+  <line x1="160" y1="96" x2="152" y2="96" stroke="white" stroke-width="2"/>
+  <line x1="32" y1="96" x2="40" y2="96" stroke="white" stroke-width="2"/>
+
+  <!-- Clock hands -->
+  <!-- Hour hand -->
+  <line x1="96" y1="96" x2="96" y2="68" stroke="white" stroke-width="6" stroke-linecap="round"/>
+  <!-- Minute hand -->
+  <line x1="96" y1="96" x2="124" y2="96" stroke="white" stroke-width="4" stroke-linecap="round"/>
+  <!-- Second hand -->
+  <line x1="96" y1="96" x2="96" y2="52" stroke="white" stroke-width="2" stroke-linecap="round"/>
+
+  <!-- Center dot -->
+  <circle cx="96" cy="96" r="8" fill="white"/>
+</svg>

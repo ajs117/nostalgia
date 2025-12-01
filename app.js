@@ -3,13 +3,30 @@ let allPosts = [];
 let filteredPosts = [];
 let displayedPosts = [];
 let currentPage = 1;
-let postsPerPage = 24;
+let postsPerPage = 21; // 21 per page
 let currentSort = 'newest';
 let currentTypeFilter = 'all';
 let currentHashtagFilter = null;
 let currentSearchQuery = '';
 let randomSeed = Date.now();
 let currentModalIndex = -1;
+let currentCarouselIndex = 0; // Track which item in a carousel is being viewed
+let isLoading = false;
+let totalPosts = 0;
+let hasMorePosts = true;
+
+// Debounce helper
+function debounce(func, wait) {
+  let timeout;
+  return function executedFunction(...args) {
+    const later = () => {
+      clearTimeout(timeout);
+      func(...args);
+    };
+    clearTimeout(timeout);
+    timeout = setTimeout(later, wait);
+  };
+}
 
 // Helper functions for creating media elements
 function createVideoElement(src, useCrossOrigin = false) {
@@ -18,42 +35,36 @@ function createVideoElement(src, useCrossOrigin = false) {
   video.preload = 'metadata';
   video.muted = true;
   video.style.width = '100%';
-  video.style.height = '280px';
+  video.style.height = '100%';
   video.style.objectFit = 'cover';
   if (useCrossOrigin) {
     video.crossOrigin = 'anonymous';
   }
   video.onerror = () => {
     console.error(`Video playback error:`, src);
-    video.parentElement.innerHTML = '<div style="padding: 20px; text-align: center; color: var(--text-secondary);">Video failed to load</div>';
+    video.parentElement.innerHTML = '<div class="media-error">Video failed to load</div>';
   };
   return video;
 }
 
 function createImageElement(src, useCrossOrigin = false) {
   const img = document.createElement('img');
-  const placeholder = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="280" height="280"%3E%3Crect fill="%23ddd" width="280" height="280"/%3E%3Ctext x="50%25" y="50%25" text-anchor="middle" dy=".3em" fill="%23999" font-family="Arial"%3EImage not available%3C/text%3E%3C/svg%3E';
+  const placeholder = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="280" height="280"%3E%3Crect fill="%231a1a1a" width="280" height="280"/%3E%3Ctext x="50%25" y="50%25" text-anchor="middle" dy=".3em" fill="%23666" font-family="system-ui"%3ENo image%3C/text%3E%3C/svg%3E';
   
-  // Validate and set image source
   if (!src) {
-    console.warn('Image source is null or undefined');
     img.src = placeholder;
   } else if (typeof src === 'string' && src.startsWith('data:')) {
-    // Valid base64 data URL
     img.src = src;
     img.alt = 'Instagram post';
     img.loading = 'lazy';
     img.style.width = '100%';
-    img.style.height = '280px';
+    img.style.height = '100%';
     img.style.objectFit = 'cover';
     img.style.display = 'block';
     img.onerror = () => {
-      console.error(`Image load error for data URL (first 100 chars):`, src.substring(0, 100));
       img.src = placeholder;
     };
   } else {
-    // Invalid source - not a data URL
-    console.warn(`Invalid image source (expected data: URL):`, src ? src.substring(0, 100) : 'null');
     img.src = placeholder;
   }
   
@@ -62,226 +73,60 @@ function createImageElement(src, useCrossOrigin = false) {
 
 function createPlaceholder(container, message, isError = false) {
   const placeholder = document.createElement('div');
-  placeholder.style.cssText = `padding: 20px; text-align: center; color: ${isError ? 'var(--error)' : 'var(--text-secondary)'}; background: var(--bg-secondary); height: 280px; display: flex; align-items: center; justify-content: center;`;
+  placeholder.className = 'media-placeholder';
   placeholder.textContent = message;
+  if (isError) placeholder.classList.add('error');
   container.appendChild(placeholder);
 }
-
-// IndexedDB helper function for client-side conversion (legacy support)
-function convertIndexedDBKeyToDataURL(key) {
-  return new Promise((resolve) => {
-    const DB_NAME = 'instagram_media_db';
-    const DB_VERSION = 1;
-    const STORE_NAME = 'media';
-    
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
-    
-    request.onsuccess = () => {
-      const db = request.result;
-      const transaction = db.transaction([STORE_NAME], 'readonly');
-      const store = transaction.objectStore(STORE_NAME);
-      const getRequest = store.get(key);
-      
-      getRequest.onsuccess = () => {
-        const blob = getRequest.result;
-        if (blob) {
-          const reader = new FileReader();
-          reader.onloadend = () => {
-            console.log(`✓ Converted ${key} to data URL (${(blob.size / 1024).toFixed(2)} KB)`);
-            resolve(reader.result);
-          };
-          reader.onerror = () => {
-            console.error(`✗ FileReader error for ${key}`);
-            resolve(null);
-          };
-          reader.readAsDataURL(blob);
-        } else {
-          console.warn(`✗ No blob found for key: ${key}`);
-          resolve(null);
-        }
-        db.close();
-      };
-      
-      getRequest.onerror = () => {
-        console.error('Error retrieving from IndexedDB:', key);
-        resolve(null);
-        db.close();
-      };
-    };
-    
-    request.onerror = () => {
-      console.error('Error opening IndexedDB');
-      resolve(null);
-    };
-    
-    request.onupgradeneeded = () => {
-      // DB doesn't exist yet
-      resolve(null);
-    };
-  });
-}
-
-// Show DB Info in modal
-function showDbInfo() {
-  const modal = document.getElementById('db-modal');
-  const content = document.getElementById('db-info-content');
-  
-  modal.classList.add('active');
-  document.body.style.overflow = 'hidden';
-  
-  content.innerHTML = `
-    <div class="loading-placeholder">
-      <div class="spinner"></div>
-      <p>Loading database info...</p>
-    </div>
-  `;
-  
-  // Get IndexedDB data (which now contains everything)
-  chrome.runtime.sendMessage({ action: 'DEBUG_INDEXEDDB' }, (response) => {
-    if (chrome.runtime.lastError) {
-      content.innerHTML = `
-        <div class="error-message">
-          <p>Error accessing IndexedDB: ${chrome.runtime.lastError.message}</p>
-        </div>
-      `;
-      return;
-    }
-    
-    if (response && response.success) {
-      const data = response.data;
-      const posts = data.posts?.data || [];
-      const collections = data.collections?.data || [];
-      
-      // Prepare data for display
-      const displayData = {
-        indexedDB: {
-          media: {
-            totalKeys: data.totalKeys,
-            imageKeys: data.imageKeys,
-            videoKeys: data.videoKeys,
-            keys: data.keys,
-            sampleData: data.sampleData
-          },
-          posts: {
-            count: posts.length,
-            data: posts
-          },
-          collections: {
-            count: collections.length,
-            data: collections
-          }
-        }
-      };
-      
-      const jsonOutput = JSON.stringify(displayData, null, 2);
-      
-      content.innerHTML = `
-        <div class="db-stats">
-          <div class="db-stat-item">
-            <span class="db-stat-label">Posts (IndexedDB):</span>
-            <span class="db-stat-value">${posts.length}</span>
-          </div>
-          <div class="db-stat-item">
-            <span class="db-stat-label">Collections:</span>
-            <span class="db-stat-value">${collections.length}</span>
-          </div>
-          <div class="db-stat-item">
-            <span class="db-stat-label">Media Keys:</span>
-            <span class="db-stat-value">${data.totalKeys || 0}</span>
-          </div>
-        </div>
-        <div class="db-storage-info">
-          <h3>Storage Location</h3>
-          <div class="storage-location">
-            <strong>IndexedDB:</strong> All data (posts, collections, and media) is stored here
-          </div>
-        </div>
-        <div class="db-raw-data">
-          <div class="db-raw-header">
-            <h3>Raw Database Data (JSON)</h3>
-            <button id="copy-db-data" class="btn btn-secondary btn-small">Copy JSON</button>
-          </div>
-          <pre id="db-json-output" class="db-json">${escapeHtml(jsonOutput)}</pre>
-        </div>
-      `;
-    
-    // Add copy functionality
-    document.getElementById('copy-db-data').addEventListener('click', () => {
-      const textarea = document.createElement('textarea');
-      textarea.value = jsonOutput;
-      textarea.style.position = 'fixed';
-      textarea.style.opacity = '0';
-      document.body.appendChild(textarea);
-      textarea.select();
-      document.execCommand('copy');
-      document.body.removeChild(textarea);
-      
-      const btn = document.getElementById('copy-db-data');
-      const originalText = btn.textContent;
-      btn.textContent = 'Copied!';
-      btn.disabled = true;
-      setTimeout(() => {
-        btn.textContent = originalText;
-        btn.disabled = false;
-      }, 2000);
-    });
-    } else {
-      content.innerHTML = `
-        <div class="error-message">
-          <p>Failed to get IndexedDB info: ${response?.error || 'Unknown error'}</p>
-        </div>
-      `;
-    }
-  });
-}
-
-function closeDbModal() {
-  const modal = document.getElementById('db-modal');
-  modal.classList.remove('active');
-  document.body.style.overflow = '';
-}
-
-function escapeHtml(text) {
-  const div = document.createElement('div');
-  div.textContent = text;
-  return div.innerHTML;
-}
-
 
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
   initializeEventListeners();
   loadPosts();
   setupMessageListener();
+  setupMobileFilters();
 });
 
 // Event listeners
 function initializeEventListeners() {
-  document.getElementById('search-input').addEventListener('input', handleSearch);
-  document.getElementById('sort-select').addEventListener('change', handleSortChange);
-  document.getElementById('type-filter').addEventListener('change', handleTypeFilterChange);
-  document.getElementById('sync-btn').addEventListener('click', handleSync);
-  document.getElementById('clear-btn').addEventListener('click', handleClearStorage);
-  document.getElementById('db-info-btn').addEventListener('click', showDbInfo);
+  // Desktop search
+  const searchInput = document.getElementById('search-input');
+  if (searchInput) {
+    searchInput.addEventListener('input', debounce(handleSearch, 300));
+  }
+  
+  // Desktop filters
+  const sortSelect = document.getElementById('sort-select');
+  const typeFilter = document.getElementById('type-filter');
+  if (sortSelect) sortSelect.addEventListener('change', handleSortChange);
+  if (typeFilter) typeFilter.addEventListener('change', handleTypeFilterChange);
+  
+  // Mobile search
+  const searchInputMobile = document.getElementById('search-input-mobile');
+  if (searchInputMobile) {
+    searchInputMobile.addEventListener('input', debounce(handleSearchMobile, 300));
+  }
+  
+  // Mobile filters
+  const sortSelectMobile = document.getElementById('sort-select-mobile');
+  const typeFilterMobile = document.getElementById('type-filter-mobile');
+  if (sortSelectMobile) sortSelectMobile.addEventListener('change', handleSortChangeMobile);
+  if (typeFilterMobile) typeFilterMobile.addEventListener('change', handleTypeFilterChangeMobile);
+  
+  // Sync button
+  const syncBtn = document.getElementById('sync-btn');
+  if (syncBtn) syncBtn.addEventListener('click', handleSync);
+  
+  // Modal
   document.getElementById('modal-close').addEventListener('click', closeModal);
-  document.getElementById('db-modal-close').addEventListener('click', closeDbModal);
-  document.getElementById('modal-prev').addEventListener('click', () => navigateModal(-1));
-  document.getElementById('modal-next').addEventListener('click', () => navigateModal(1));
   document.getElementById('modal').addEventListener('click', (e) => {
     if (e.target.id === 'modal') closeModal();
-  });
-  document.getElementById('db-modal').addEventListener('click', (e) => {
-    if (e.target.id === 'db-modal') closeDbModal();
   });
 
   // Keyboard navigation
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      if (currentModalIndex >= 0) {
-        closeModal();
-      } else if (document.getElementById('db-modal').classList.contains('active')) {
-        closeDbModal();
-      }
+    if (e.key === 'Escape' && currentModalIndex >= 0) {
+      closeModal();
     }
     if (currentModalIndex >= 0) {
       if (e.key === 'ArrowLeft') navigateModal(-1);
@@ -290,9 +135,49 @@ function initializeEventListeners() {
   });
 }
 
-// Load posts from storage
-function loadPosts() {
-  chrome.runtime.sendMessage({ action: 'GET_INSTAGRAM_POSTS' }, (response) => {
+// Mobile filters drawer
+function setupMobileFilters() {
+  const toggle = document.getElementById('mobile-filters-toggle');
+  const drawer = document.getElementById('mobile-filters-drawer');
+  const overlay = document.getElementById('drawer-overlay');
+  const closeBtn = document.getElementById('close-filters');
+  
+  if (!toggle || !drawer || !overlay) return;
+  
+  toggle.addEventListener('click', () => {
+    drawer.classList.add('open');
+    overlay.classList.add('open');
+    document.body.style.overflow = 'hidden';
+  });
+  
+  const closeDrawer = () => {
+    drawer.classList.remove('open');
+    overlay.classList.remove('open');
+    document.body.style.overflow = '';
+  };
+  
+  if (closeBtn) closeBtn.addEventListener('click', closeDrawer);
+  overlay.addEventListener('click', closeDrawer);
+}
+
+// Load posts with pagination from background
+function loadPosts(append = false) {
+  if (isLoading) return;
+  
+  isLoading = true;
+  showLoadingState();
+  
+  chrome.runtime.sendMessage({ 
+    action: 'GET_INSTAGRAM_POSTS',
+    page: currentPage,
+    limit: postsPerPage,
+    sortBy: currentSort,
+    filterType: currentTypeFilter,
+    searchQuery: currentSearchQuery
+  }, (response) => {
+    isLoading = false;
+    hideLoadingState();
+    
     if (chrome.runtime.lastError) {
       console.error('Error loading posts:', chrome.runtime.lastError);
       showError('Failed to load posts');
@@ -300,50 +185,148 @@ function loadPosts() {
     }
 
     if (response && response.success) {
-      allPosts = response.posts || [];
+      if (append) {
+        allPosts = [...allPosts, ...(response.posts || [])];
+      } else {
+        allPosts = response.posts || [];
+      }
+      totalPosts = response.total || 0;
+      hasMorePosts = response.hasMore || false;
+      
+      filteredPosts = allPosts;
+      displayedPosts = allPosts;
+      
       updateStats();
-      applyFilters();
+      renderPosts();
+      renderPagination();
     } else {
-      showError('No posts found');
+      showError('No posts found. Click "Sync Posts" to import your Instagram saved posts.');
       allPosts = [];
-      applyFilters();
+      totalPosts = 0;
+      renderPosts();
     }
   });
+}
+
+// Show loading state
+function showLoadingState() {
+  const container = document.getElementById('posts-container');
+  
+  if (container.children.length === 0) {
+    container.innerHTML = '';
+    for (let i = 0; i < 15; i++) {
+      const skeleton = document.createElement('div');
+      skeleton.className = 'post-card skeleton';
+      skeleton.innerHTML = `
+        <div class="skeleton-image"></div>
+        <div class="skeleton-info">
+          <div class="skeleton-title"></div>
+          <div class="skeleton-username"></div>
+        </div>
+      `;
+      container.appendChild(skeleton);
+    }
+  }
+}
+
+function hideLoadingState() {
+  const skeletons = document.querySelectorAll('.post-card.skeleton');
+  skeletons.forEach(s => s.remove());
 }
 
 // Message listener for live updates
 function setupMessageListener() {
   chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === 'UPDATE_ITEMS') {
-      // Immediately reload posts when update is received
+      // Don't reset page during sync - preserve user's current page position
       loadPosts();
+    } else if (request.action === 'SYNC_STARTED') {
+      updateSyncStatus('syncing', 'Syncing posts...');
+      const syncBtn = document.getElementById('sync-btn');
+      if (syncBtn) syncBtn.style.display = 'none';
+    } else if (request.action === 'SYNC_COMPLETE') {
+      updateSyncStatus('success', `Sync complete! ${request.syncedCount} posts synced`);
+      // Only reset to page 1 when sync is fully complete, not during
+      currentPage = 1;
+      loadPosts();
+      setTimeout(() => {
+        updateSyncStatus('', '');
+        const syncBtn = document.getElementById('sync-btn');
+        if (syncBtn) syncBtn.style.display = '';
+      }, 3000);
+    } else if (request.action === 'IMPORT_FAILED') {
+      updateSyncStatus('error', 'Sync failed. Please try again.');
+      setTimeout(() => {
+        updateSyncStatus('', '');
+        const syncBtn = document.getElementById('sync-btn');
+        if (syncBtn) syncBtn.style.display = '';
+      }, 3000);
     }
-    return true; // Keep channel open for async response
+    return true;
   });
 }
 
-// Search handler
+// Search handlers
 function handleSearch(e) {
   currentSearchQuery = e.target.value.toLowerCase().trim();
+  // Sync with mobile
+  const mobileInput = document.getElementById('search-input-mobile');
+  if (mobileInput) mobileInput.value = e.target.value;
   currentPage = 1;
-  applyFilters();
+  loadPosts();
 }
 
-// Sort handler
+function handleSearchMobile(e) {
+  currentSearchQuery = e.target.value.toLowerCase().trim();
+  // Sync with desktop
+  const desktopInput = document.getElementById('search-input');
+  if (desktopInput) desktopInput.value = e.target.value;
+  currentPage = 1;
+  loadPosts();
+}
+
+// Sort handlers
 function handleSortChange(e) {
   currentSort = e.target.value;
+  // Sync with mobile
+  const mobileSelect = document.getElementById('sort-select-mobile');
+  if (mobileSelect) mobileSelect.value = e.target.value;
   currentPage = 1;
   if (currentSort === 'random') {
     randomSeed = Date.now();
   }
-  applyFilters();
+  loadPosts();
 }
 
-// Type filter handler
+function handleSortChangeMobile(e) {
+  currentSort = e.target.value;
+  // Sync with desktop
+  const desktopSelect = document.getElementById('sort-select');
+  if (desktopSelect) desktopSelect.value = e.target.value;
+  currentPage = 1;
+  if (currentSort === 'random') {
+    randomSeed = Date.now();
+  }
+  loadPosts();
+}
+
+// Type filter handlers
 function handleTypeFilterChange(e) {
   currentTypeFilter = e.target.value;
+  // Sync with mobile
+  const mobileSelect = document.getElementById('type-filter-mobile');
+  if (mobileSelect) mobileSelect.value = e.target.value;
   currentPage = 1;
-  applyFilters();
+  loadPosts();
+}
+
+function handleTypeFilterChangeMobile(e) {
+  currentTypeFilter = e.target.value;
+  // Sync with desktop
+  const desktopSelect = document.getElementById('type-filter');
+  if (desktopSelect) desktopSelect.value = e.target.value;
+  currentPage = 1;
+  loadPosts();
 }
 
 // Hashtag filter handler
@@ -354,30 +337,14 @@ function handleHashtagClick(hashtag) {
     currentHashtagFilter = hashtag;
   }
   currentPage = 1;
-  applyFilters();
+  applyLocalFilters();
   updateHashtagChips();
 }
 
-// Apply all filters
-function applyFilters() {
-  // Search filter
-  let filtered = allPosts.filter(post => {
-    if (currentSearchQuery) {
-      const searchText = (post.title || '').toLowerCase();
-      const username = (post.username || '').toLowerCase();
-      return searchText.includes(currentSearchQuery) || username.includes(currentSearchQuery);
-    }
-    return true;
-  });
-
-  // Type filter
-  if (currentTypeFilter === 'photo') {
-    filtered = filtered.filter(post => !post.isVideo);
-  } else if (currentTypeFilter === 'video') {
-    filtered = filtered.filter(post => post.isVideo);
-  }
-
-  // Hashtag filter
+// Apply local filters (hashtag only - search/sort/type done server-side)
+function applyLocalFilters() {
+  let filtered = allPosts;
+  
   if (currentHashtagFilter) {
     filtered = filtered.filter(post => {
       const caption = post.title || '';
@@ -386,52 +353,10 @@ function applyFilters() {
     });
   }
 
-  // Sort
-  filtered = sortPosts(filtered, currentSort);
-
   filteredPosts = filtered;
-  updatePagination();
+  displayedPosts = filtered;
   renderPosts();
   updateStats();
-}
-
-// Sort posts
-function sortPosts(posts, sortType) {
-  const sorted = [...posts];
-  
-  if (sortType === 'newest') {
-    // Assuming posts are already in order, but we can sort by ID if needed
-    return sorted;
-  } else if (sortType === 'oldest') {
-    return sorted.reverse();
-  } else if (sortType === 'random') {
-    // Use seeded random for consistent results during same session
-    return shuffledArray(sorted, randomSeed);
-  }
-  
-  return sorted;
-}
-
-// Fisher-Yates shuffle with seed
-function shuffledArray(array, seed) {
-  const shuffled = [...array];
-  let random = seedGenerator(seed);
-  
-  for (let i = shuffled.length - 1; i > 0; i--) {
-    const j = Math.floor(random() * (i + 1));
-    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
-  }
-  
-  return shuffled;
-}
-
-// Simple seeded random number generator
-function seedGenerator(seed) {
-  let value = seed;
-  return function() {
-    value = (value * 9301 + 49297) % 233280;
-    return value / 233280;
-  };
 }
 
 // Extract hashtags from text
@@ -439,22 +364,6 @@ function extractHashtags(text) {
   const hashtagRegex = /#[\w]+/g;
   const matches = text.match(hashtagRegex);
   return matches ? matches.map(tag => tag.toLowerCase()) : [];
-}
-
-// Get all unique hashtags with counts
-function getAllHashtags() {
-  const hashtagCounts = new Map();
-  allPosts.forEach(post => {
-    const caption = post.title || '';
-    extractHashtags(caption).forEach(tag => {
-      hashtagCounts.set(tag, (hashtagCounts.get(tag) || 0) + 1);
-    });
-  });
-  // Convert to array of objects with tag and count, sorted by count descending
-  return Array.from(hashtagCounts.entries())
-    .map(([tag, count]) => ({ tag, count }))
-    .sort((a, b) => b.count - a.count)
-    .map(item => item.tag); // Return just the tags for backward compatibility
 }
 
 // Get hashtags with counts
@@ -466,52 +375,42 @@ function getHashtagsWithCounts() {
       hashtagCounts.set(tag, (hashtagCounts.get(tag) || 0) + 1);
     });
   });
-  // Return array sorted by count descending
   return Array.from(hashtagCounts.entries())
     .map(([tag, count]) => ({ tag, count }))
     .sort((a, b) => b.count - a.count);
 }
 
-// Update hashtag chips
+// Update hashtag chips (both desktop and mobile)
 function updateHashtagChips() {
-  const container = document.getElementById('hashtag-chips');
+  const containers = [
+    document.getElementById('hashtag-chips'),
+    document.getElementById('hashtag-chips-mobile')
+  ].filter(Boolean);
+  
   const hashtagsWithCounts = getHashtagsWithCounts();
   
-  container.innerHTML = '';
-  
-  if (hashtagsWithCounts.length === 0) {
-    container.innerHTML = '<span style="color: var(--text-secondary); font-size: 12px;">No hashtags found</span>';
-    return;
-  }
+  containers.forEach(container => {
+    container.innerHTML = '';
+    
+    if (hashtagsWithCounts.length === 0) {
+      container.innerHTML = '<span class="no-hashtags">No hashtags found</span>';
+      return;
+    }
 
-  // Show top 30 hashtags with counts
-  hashtagsWithCounts.slice(0, 30).forEach(({ tag, count }) => {
-    const chip = document.createElement('span');
-    chip.className = `hashtag-chip ${currentHashtagFilter === tag ? 'active' : ''}`;
-    chip.innerHTML = `${tag} <span class="hashtag-count">${count}</span>`;
-    chip.addEventListener('click', () => handleHashtagClick(tag));
-    container.appendChild(chip);
+    hashtagsWithCounts.slice(0, 25).forEach(({ tag, count }) => {
+      const chip = document.createElement('span');
+      chip.className = `hashtag-chip ${currentHashtagFilter === tag ? 'active' : ''}`;
+      chip.innerHTML = `${tag} <span class="hashtag-count">${count}</span>`;
+      chip.addEventListener('click', () => handleHashtagClick(tag));
+      container.appendChild(chip);
+    });
   });
 }
 
-// Update pagination
-function updatePagination() {
-  const totalPages = Math.max(1, Math.ceil(filteredPosts.length / postsPerPage));
-  // Ensure currentPage is valid
-  if (currentPage < 1) currentPage = 1;
-  if (currentPage > totalPages) currentPage = totalPages;
-
-  const start = (currentPage - 1) * postsPerPage;
-  const end = start + postsPerPage;
-  displayedPosts = filteredPosts.slice(start, end);
-
-  renderPagination(totalPages);
-  updateStats(); // Update stats after pagination changes
-}
-
 // Render pagination controls
-function renderPagination(totalPages) {
+function renderPagination() {
   const container = document.getElementById('pagination');
+  const totalPages = Math.max(1, Math.ceil(totalPosts / postsPerPage));
   
   if (totalPages <= 1) {
     container.innerHTML = '';
@@ -522,25 +421,42 @@ function renderPagination(totalPages) {
   
   // Previous button
   const prevBtn = document.createElement('button');
-  prevBtn.textContent = '‹ Previous';
+  prevBtn.innerHTML = '← Prev';
   prevBtn.disabled = currentPage === 1;
   prevBtn.addEventListener('click', () => {
     if (currentPage > 1) {
       currentPage--;
-      updatePagination(); // This now calls updateStats internally
-      renderPosts();
+      loadPosts();
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }
   });
   container.appendChild(prevBtn);
 
   // Page numbers
-  const maxVisible = 5;
+  const maxVisible = 7;
   let startPage = Math.max(1, currentPage - Math.floor(maxVisible / 2));
   let endPage = Math.min(totalPages, startPage + maxVisible - 1);
   
   if (endPage - startPage < maxVisible - 1) {
     startPage = Math.max(1, endPage - maxVisible + 1);
+  }
+
+  if (startPage > 1) {
+    const firstBtn = document.createElement('button');
+    firstBtn.textContent = '1';
+    firstBtn.addEventListener('click', () => {
+      currentPage = 1;
+      loadPosts();
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+    container.appendChild(firstBtn);
+    
+    if (startPage > 2) {
+      const ellipsis = document.createElement('span');
+      ellipsis.className = 'pagination-ellipsis';
+      ellipsis.textContent = '...';
+      container.appendChild(ellipsis);
+    }
   }
 
   for (let i = startPage; i <= endPage; i++) {
@@ -549,106 +465,59 @@ function renderPagination(totalPages) {
     btn.className = i === currentPage ? 'active' : '';
     btn.addEventListener('click', () => {
       currentPage = i;
-      updatePagination(); // This now calls updateStats internally
-      renderPosts();
+      loadPosts();
       window.scrollTo({ top: 0, behavior: 'smooth' });
     });
     container.appendChild(btn);
   }
 
-  // Page number input
-  const pageInputWrapper = document.createElement('div');
-  pageInputWrapper.className = 'page-input-wrapper';
-  pageInputWrapper.innerHTML = `
-    <span>Go to:</span>
-    <input type="number" id="page-input" min="1" max="${totalPages}" value="${currentPage}" />
-    <span>of ${totalPages}</span>
-  `;
-  
-  const pageInput = pageInputWrapper.querySelector('#page-input');
-  pageInput.addEventListener('keypress', (e) => {
-    if (e.key === 'Enter') {
-      const pageNum = parseInt(pageInput.value, 10);
-      if (pageNum >= 1 && pageNum <= totalPages) {
-        currentPage = pageNum;
-        updatePagination(); // This now calls updateStats internally
-        renderPosts();
-        window.scrollTo({ top: 0, behavior: 'smooth' });
-      } else {
-        pageInput.value = currentPage;
-      }
+  if (endPage < totalPages) {
+    if (endPage < totalPages - 1) {
+      const ellipsis = document.createElement('span');
+      ellipsis.className = 'pagination-ellipsis';
+      ellipsis.textContent = '...';
+      container.appendChild(ellipsis);
     }
-  });
-  
-  pageInput.addEventListener('blur', () => {
-    const pageNum = parseInt(pageInput.value, 10);
-    if (pageNum >= 1 && pageNum <= totalPages) {
-      if (pageNum !== currentPage) {
-        currentPage = pageNum;
-        updatePagination(); // This now calls updateStats internally
-        renderPosts();
-        window.scrollTo({ top: 0, behavior: 'smooth' });
-      }
-    } else {
-      pageInput.value = currentPage;
-    }
-  });
-  
-  container.appendChild(pageInputWrapper);
+    
+    const lastBtn = document.createElement('button');
+    lastBtn.textContent = totalPages;
+    lastBtn.addEventListener('click', () => {
+      currentPage = totalPages;
+      loadPosts();
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+    container.appendChild(lastBtn);
+  }
 
   // Next button
   const nextBtn = document.createElement('button');
-  nextBtn.textContent = 'Next ›';
+  nextBtn.innerHTML = 'Next →';
   nextBtn.disabled = currentPage === totalPages;
   nextBtn.addEventListener('click', () => {
     if (currentPage < totalPages) {
       currentPage++;
-      updatePagination(); // This now calls updateStats internally
-      renderPosts();
+      loadPosts();
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }
   });
   container.appendChild(nextBtn);
 }
 
-// Render posts with minimal flickering
+// Render posts
 function renderPosts() {
   const container = document.getElementById('posts-container');
   
   if (displayedPosts.length === 0) {
     container.innerHTML = `
       <div class="empty-state">
+        <div class="empty-icon">📸</div>
         <p>No posts found${currentSearchQuery ? ` matching "${currentSearchQuery}"` : ''}</p>
+        <p class="empty-hint">Try adjusting your filters or sync more posts</p>
       </div>
     `;
     return;
   }
 
-  // Get existing post IDs to check what's already rendered
-  const existingCards = Array.from(container.querySelectorAll('.post-card'));
-  const existingPostIds = new Set(
-    existingCards.map(card => card.dataset.postId).filter(Boolean)
-  );
-  
-  // Get displayed post IDs
-  const displayedPostIds = new Set(displayedPosts.map(p => p.id));
-  
-  // Check if we can skip re-rendering (all posts already displayed and in same order)
-  const allExist = displayedPosts.every(p => existingPostIds.has(p.id));
-  const sameCount = existingCards.length === displayedPosts.length;
-  
-  if (allExist && sameCount) {
-    // All posts already exist, just update indices if needed
-    displayedPosts.forEach((post, index) => {
-      const card = container.querySelector(`[data-post-id="${post.id}"]`);
-      if (card) {
-        card.dataset.index = index;
-      }
-    });
-    return;
-  }
-  
-  // Need to re-render, use DocumentFragment to batch DOM updates and prevent flickering
   const fragment = document.createDocumentFragment();
   
   displayedPosts.forEach((post, index) => {
@@ -668,32 +537,44 @@ function createPostCard(post, index) {
   card.dataset.postId = post.id;
 
   const mediaContainer = document.createElement('div');
-  mediaContainer.style.position = 'relative';
+  mediaContainer.className = 'post-media';
 
-  // Display thumbnail (base64 data URL stored directly in post.image)
-  if (post.image && typeof post.image === 'string' && post.image.startsWith('data:')) {
-    // Valid base64 data URL - display it
-    const img = createImageElement(post.image);
+  // Display thumbnail
+  const imgSrc = post.image || post.thumbnail;
+  if (imgSrc && typeof imgSrc === 'string' && imgSrc.startsWith('data:')) {
+    const img = createImageElement(imgSrc);
     mediaContainer.appendChild(img);
     
-    // Add video indicator if it's a video
-    if (post.isVideo) {
+    // Show carousel indicator for multi-item posts
+    if (post.isCarousel && post.carouselCount > 1) {
+      const indicator = document.createElement('div');
+      indicator.className = 'carousel-indicator';
+      indicator.innerHTML = `
+        <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
+          <path d="M6 4h12a2 2 0 012 2v12a2 2 0 01-2 2H6a2 2 0 01-2-2V6a2 2 0 012-2zm0 2v12h12V6H6z"/>
+          <path d="M9 4V2h12a2 2 0 012 2v12h-2V4H9z" opacity="0.6"/>
+        </svg>
+        <span>${post.carouselCount}</span>
+      `;
+      mediaContainer.appendChild(indicator);
+    } else if (post.isVideo) {
       const indicator = document.createElement('div');
       indicator.className = 'video-indicator';
-      indicator.innerHTML = '▶ Video';
+      indicator.innerHTML = `
+        <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14">
+          <path d="M8 5v14l11-7z"/>
+        </svg>
+      `;
       mediaContainer.appendChild(indicator);
     }
   } else {
-    // No valid image - show placeholder
-    const message = post.isVideo ? 'Video thumbnail not available' : 'Image not available';
-    createPlaceholder(mediaContainer, message);
-    console.warn(`Post ${post.id} has invalid image:`, post.image ? post.image.substring(0, 50) : 'null');
+    createPlaceholder(mediaContainer, post.isVideo ? '🎬' : (post.isCarousel ? '📸' : '📷'));
   }
 
   const overlay = document.createElement('div');
   overlay.className = 'post-overlay';
   overlay.innerHTML = `
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" width="32" height="32">
       <circle cx="12" cy="12" r="10" stroke-width="2"/>
       <path d="M10 8l6 4-6 4V8z" fill="currentColor"/>
     </svg>
@@ -705,57 +586,66 @@ function createPostCard(post, index) {
   const info = document.createElement('div');
   info.className = 'post-info';
   
-  const title = document.createElement('div');
-  title.className = 'post-title';
-  title.textContent = post.title || 'Untitled';
-  info.appendChild(title);
-
   const username = document.createElement('div');
   username.className = 'post-username';
   username.textContent = `@${post.username || 'unknown'}`;
   info.appendChild(username);
+  
+  const title = document.createElement('div');
+  title.className = 'post-title';
+  title.textContent = truncateText(post.title || '', 50);
+  info.appendChild(title);
 
   const hashtags = extractHashtags(post.title || '');
   if (hashtags.length > 0) {
     const hashtagDiv = document.createElement('div');
     hashtagDiv.className = 'post-hashtags';
-    hashtags.slice(0, 3).forEach(tag => {
+    hashtags.slice(0, 2).forEach(tag => {
       const span = document.createElement('span');
       span.className = 'hashtag';
       span.textContent = tag;
       hashtagDiv.appendChild(span);
     });
-    if (hashtags.length > 3) {
-      hashtagDiv.innerHTML += ` <span style="color: var(--text-secondary);">+${hashtags.length - 3}</span>`;
+    if (hashtags.length > 2) {
+      const more = document.createElement('span');
+      more.className = 'hashtag-more';
+      more.textContent = `+${hashtags.length - 2}`;
+      hashtagDiv.appendChild(more);
     }
     info.appendChild(hashtagDiv);
   }
 
   card.appendChild(info);
-
   card.addEventListener('click', () => openModal(index));
 
   return card;
 }
 
+function truncateText(text, maxLength) {
+  if (!text) return '';
+  if (text.length <= maxLength) return text;
+  return text.substring(0, maxLength) + '...';
+}
+
 // Open modal
-function openModal(index) {
+function openModal(index, carouselIdx = 0) {
   if (index < 0 || index >= displayedPosts.length) return;
   
   const modal = document.getElementById('modal');
   const mediaContainer = document.getElementById('modal-media');
   
-  // Stop any currently playing videos before switching
+  // Stop current videos
   if (currentModalIndex >= 0 && mediaContainer) {
     const currentVideos = mediaContainer.querySelectorAll('video');
     currentVideos.forEach(video => {
       video.pause();
       video.currentTime = 0;
-      video.src = ''; // Clear src to stop loading
+      video.src = '';
     });
   }
   
   currentModalIndex = index;
+  currentCarouselIndex = carouselIdx;
   const post = displayedPosts[index];
   
   if (!post) return;
@@ -766,86 +656,22 @@ function openModal(index) {
   const linkEl = document.getElementById('modal-link');
   const hashtagsEl = document.getElementById('modal-hashtags');
 
-  // Clear previous content (this will also remove any remaining video elements)
   mediaContainer.innerHTML = '';
 
-  // Handle videos differently - fetch CDN link from Instagram
-  if (post.isVideo) {
-    // Show loading state
-    mediaContainer.innerHTML = `
-      <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 40px; color: var(--text-secondary);">
-        <div class="spinner" style="margin-bottom: 20px;"></div>
-        <p>Loading video...</p>
-      </div>
-    `;
-    
-    console.log('Fetching video for post:', post.id, 'link:', post.link);
-    
-    if (!post.link) {
-      console.error('Post has no link field:', post);
-      mediaContainer.innerHTML = `
-        <p style="color: var(--error); padding: 20px;">Post has no link. Post data: ${JSON.stringify(post).substring(0, 200)}</p>
-      `;
-      return;
-    }
-    
-    // Request video CDN link from background script
-    chrome.runtime.sendMessage({
-      action: 'FETCH_VIDEO_CDN',
-      permalink: post.link,
-      postId: post.id
-    }, (response) => {
-      if (chrome.runtime.lastError) {
-        console.error('Error fetching video:', chrome.runtime.lastError);
-        mediaContainer.innerHTML = `
-          <p style="color: var(--error); padding: 20px;">Failed to load video. <a href="${post.link}" target="_blank" style="color: var(--accent);">View on Instagram</a></p>
-        `;
-        return;
-      }
-      
-      if (response && response.success && response.videoUrl) {
-        // Play the video
-        const video = createVideoElement(response.videoUrl, true);
-        video.controls = true;
-        video.style.maxHeight = '90vh';
-        video.style.maxWidth = '100%';
-        video.style.width = 'auto';
-        video.style.height = 'auto';
-        mediaContainer.innerHTML = '';
-        mediaContainer.appendChild(video);
-      } else {
-        // Failed to get video URL
-        const errorMsg = response?.error || 'Unknown error';
-        console.error('Failed to fetch video URL:', errorMsg);
-        mediaContainer.innerHTML = `
-          <p style="color: var(--error); padding: 20px;">Failed to load video: ${errorMsg}. <a href="${post.link}" target="_blank" style="color: var(--accent);">View on Instagram</a></p>
-        `;
-      }
-    });
-  } else if (post.image && typeof post.image === 'string' && post.image.startsWith('data:')) {
-    // Display image for photos
-    const img = document.createElement('img');
-    img.src = post.image;
-    img.alt = post.title || 'Instagram post';
-    img.style.maxHeight = '70vh';
-    img.style.width = 'auto';
-    img.style.maxWidth = '100%';
-    img.style.display = 'block';
-    img.style.margin = '0 auto';
-    img.onerror = () => {
-      console.error(`Modal image error for post ${post.id}:`, post.image ? post.image.substring(0, 100) : 'null');
-      mediaContainer.innerHTML = '<p style="color: var(--error); padding: 20px;">Image failed to load</p>';
-    };
-    mediaContainer.appendChild(img);
+  // Check if this is a carousel post
+  if (post.isCarousel && post.carouselMedia && post.carouselMedia.length > 0) {
+    renderCarouselModal(post, mediaContainer, carouselIdx);
+  } else if (post.isVideo) {
+    renderVideoModal(post, mediaContainer);
   } else {
-    // No valid image - show message
-    mediaContainer.innerHTML = '<p style="color: var(--text-secondary); padding: 20px;">Image not available</p>';
-    console.warn(`Modal: Post ${post.id} has invalid image:`, post.image ? post.image.substring(0, 50) : 'null');
+    renderImageModal(post, mediaContainer);
   }
 
-  titleEl.textContent = post.title || 'Untitled';
+  titleEl.textContent = post.username ? `@${post.username}` : 'Post';
   captionEl.textContent = post.title || '';
   usernameEl.textContent = `@${post.username || 'unknown'}`;
+  
+  linkEl.style.display = post.link ? '' : 'none';
   linkEl.href = post.link || '#';
 
   const hashtags = extractHashtags(post.title || '');
@@ -861,24 +687,333 @@ function openModal(index) {
 
   modal.classList.add('active');
   document.body.style.overflow = 'hidden';
+}
 
-  // Update nav buttons
-  document.getElementById('modal-prev').style.display = index > 0 ? 'flex' : 'none';
-  document.getElementById('modal-next').style.display = index < displayedPosts.length - 1 ? 'flex' : 'none';
+// Render carousel in modal
+function renderCarouselModal(post, container, startIndex = 0) {
+  const items = post.carouselMedia;
+  currentCarouselIndex = Math.min(startIndex, items.length - 1);
+  
+  // Create carousel wrapper
+  const carouselWrapper = document.createElement('div');
+  carouselWrapper.className = 'carousel-wrapper';
+  
+  // Create slides container
+  const slidesContainer = document.createElement('div');
+  slidesContainer.className = 'carousel-slides';
+  slidesContainer.id = 'carousel-slides';
+  
+  // Create slides for each item
+  items.forEach((item, idx) => {
+    const slide = document.createElement('div');
+    slide.className = `carousel-slide ${idx === currentCarouselIndex ? 'active' : ''}`;
+    slide.dataset.index = idx;
+    
+    if (item.isVideo) {
+      slide.innerHTML = `
+        <div class="loading-video">
+          <div class="spinner"></div>
+          <p>Loading video...</p>
+        </div>
+      `;
+      // We'll load video content when the slide becomes active
+    } else {
+      // Show loading placeholder first
+      slide.innerHTML = '<div class="loading-video"><div class="spinner"></div></div>';
+    }
+    
+    slidesContainer.appendChild(slide);
+  });
+  
+  carouselWrapper.appendChild(slidesContainer);
+  
+  // Create navigation arrows
+  if (items.length > 1) {
+    const prevBtn = document.createElement('button');
+    prevBtn.className = 'carousel-nav carousel-prev';
+    prevBtn.innerHTML = '‹';
+    prevBtn.onclick = () => navigateCarousel(-1, post);
+    
+    const nextBtn = document.createElement('button');
+    nextBtn.className = 'carousel-nav carousel-next';
+    nextBtn.innerHTML = '›';
+    nextBtn.onclick = () => navigateCarousel(1, post);
+    
+    carouselWrapper.appendChild(prevBtn);
+    carouselWrapper.appendChild(nextBtn);
+    
+    // Create dots indicator
+    const dotsContainer = document.createElement('div');
+    dotsContainer.className = 'carousel-dots';
+    dotsContainer.id = 'carousel-dots';
+    
+    items.forEach((_, idx) => {
+      const dot = document.createElement('span');
+      dot.className = `carousel-dot ${idx === currentCarouselIndex ? 'active' : ''}`;
+      dot.onclick = () => goToCarouselSlide(idx, post);
+      dotsContainer.appendChild(dot);
+    });
+    
+    carouselWrapper.appendChild(dotsContainer);
+    
+    // Counter
+    const counter = document.createElement('div');
+    counter.className = 'carousel-counter';
+    counter.id = 'carousel-counter';
+    counter.textContent = `${currentCarouselIndex + 1} / ${items.length}`;
+    carouselWrapper.appendChild(counter);
+  }
+  
+  container.appendChild(carouselWrapper);
+  
+  // Load the current slide content
+  loadCarouselSlide(currentCarouselIndex, post);
+}
+
+// Load content for a carousel slide
+function loadCarouselSlide(idx, post) {
+  const items = post.carouselMedia;
+  const item = items[idx];
+  const slides = document.querySelectorAll('.carousel-slide');
+  const slide = slides[idx];
+  
+  if (!slide || !item) return;
+  
+  // Check if already loaded
+  if (slide.dataset.loaded === 'true') return;
+  
+  if (item.isVideo) {
+    // Fetch video from Instagram
+    chrome.runtime.sendMessage({
+      action: 'FETCH_CAROUSEL_VIDEO',
+      permalink: post.link,
+      postId: post.id,
+      carouselIndex: idx
+    }, (response) => {
+      if (response && response.success && response.videoUrl) {
+        const video = document.createElement('video');
+        video.src = response.videoUrl;
+        video.controls = true;
+        video.className = 'modal-video';
+        video.crossOrigin = 'anonymous';
+        
+        video.addEventListener('loadedmetadata', () => {
+          const aspectRatio = video.videoWidth / video.videoHeight;
+          video.classList.remove('portrait', 'square', 'landscape');
+          if (aspectRatio < 0.7) video.classList.add('portrait');
+          else if (aspectRatio >= 0.7 && aspectRatio <= 1.3) video.classList.add('square');
+          else video.classList.add('landscape');
+        });
+        
+        slide.innerHTML = '';
+        slide.appendChild(video);
+        slide.dataset.loaded = 'true';
+        
+        // Auto-play if this is the current slide
+        if (idx === currentCarouselIndex) {
+          video.play().catch(() => {});
+        }
+      } else {
+        // Fallback: show image thumbnail
+        if (item.imageUrl) {
+          const img = document.createElement('img');
+          img.src = item.imageUrl;
+          img.className = 'modal-image';
+          img.alt = 'Video thumbnail';
+          slide.innerHTML = '';
+          slide.appendChild(img);
+          
+          const playOverlay = document.createElement('div');
+          playOverlay.className = 'video-play-overlay';
+          playOverlay.innerHTML = '<span>▶</span> Video unavailable';
+          slide.appendChild(playOverlay);
+        } else {
+          slide.innerHTML = '<p class="error-message">Video failed to load</p>';
+        }
+        slide.dataset.loaded = 'true';
+      }
+    });
+  } else {
+    // Load image
+    const imageUrl = item.imageUrl;
+    if (imageUrl) {
+      const img = document.createElement('img');
+      img.className = 'modal-image';
+      img.alt = 'Instagram post';
+      img.onload = () => {
+        slide.dataset.loaded = 'true';
+      };
+      img.onerror = () => {
+        slide.innerHTML = '<p class="error-message">Image failed to load</p>';
+        slide.dataset.loaded = 'true';
+      };
+      img.src = imageUrl;
+      slide.innerHTML = '';
+      slide.appendChild(img);
+    } else {
+      slide.innerHTML = '<p class="no-media">Image not available</p>';
+      slide.dataset.loaded = 'true';
+    }
+  }
+}
+
+// Navigate carousel
+function navigateCarousel(direction, post) {
+  const items = post.carouselMedia;
+  const newIndex = currentCarouselIndex + direction;
+  
+  if (newIndex >= 0 && newIndex < items.length) {
+    goToCarouselSlide(newIndex, post);
+  }
+}
+
+// Go to specific carousel slide
+function goToCarouselSlide(idx, post) {
+  const items = post.carouselMedia;
+  if (idx < 0 || idx >= items.length) return;
+  
+  // Pause current video if any
+  const currentSlide = document.querySelector('.carousel-slide.active');
+  if (currentSlide) {
+    const video = currentSlide.querySelector('video');
+    if (video) {
+      video.pause();
+    }
+  }
+  
+  currentCarouselIndex = idx;
+  
+  // Update slide visibility
+  const slides = document.querySelectorAll('.carousel-slide');
+  slides.forEach((slide, i) => {
+    slide.classList.toggle('active', i === idx);
+  });
+  
+  // Update dots
+  const dots = document.querySelectorAll('.carousel-dot');
+  dots.forEach((dot, i) => {
+    dot.classList.toggle('active', i === idx);
+  });
+  
+  // Update counter
+  const counter = document.getElementById('carousel-counter');
+  if (counter) {
+    counter.textContent = `${idx + 1} / ${items.length}`;
+  }
+  
+  // Load the new slide content if not already loaded
+  loadCarouselSlide(idx, post);
+  
+  // Play video if the new slide has one
+  const newSlide = slides[idx];
+  if (newSlide) {
+    const video = newSlide.querySelector('video');
+    if (video) {
+      video.play().catch(() => {});
+    }
+  }
+}
+
+// Render single video in modal
+function renderVideoModal(post, container) {
+  container.innerHTML = `
+    <div class="loading-video">
+      <div class="spinner"></div>
+      <p>Loading video...</p>
+    </div>
+  `;
+  
+  if (!post.link) {
+    container.innerHTML = `<p class="error-message">Post has no link</p>`;
+    return;
+  }
+  
+  chrome.runtime.sendMessage({
+    action: 'FETCH_VIDEO_CDN',
+    permalink: post.link,
+    postId: post.id
+  }, (response) => {
+    if (chrome.runtime.lastError) {
+      container.innerHTML = `<p class="error-message">Failed to load video</p>`;
+      return;
+    }
+    
+    if (response && response.success && response.videoUrl) {
+      const video = createVideoElement(response.videoUrl, true);
+      video.controls = true;
+      video.autoplay = true;
+      video.className = 'modal-video';
+      container.innerHTML = '';
+      container.appendChild(video);
+      
+      video.addEventListener('loadedmetadata', () => {
+        const aspectRatio = video.videoWidth / video.videoHeight;
+        video.classList.remove('portrait', 'square', 'landscape');
+        
+        if (aspectRatio < 0.7) {
+          video.classList.add('portrait');
+        } else if (aspectRatio >= 0.7 && aspectRatio <= 1.3) {
+          video.classList.add('square');
+        } else {
+          video.classList.add('landscape');
+        }
+      });
+      
+      video.addEventListener('loadeddata', () => {
+        video.play().catch(() => {});
+      });
+    } else {
+      container.innerHTML = `<p class="error-message">Failed to load video: ${response?.error || 'Unknown error'}</p>`;
+    }
+  });
+}
+
+// Render single image in modal
+function renderImageModal(post, container) {
+  const imgSrc = post.image || post.thumbnail;
+  
+  if (imgSrc && typeof imgSrc === 'string') {
+    const img = document.createElement('img');
+    img.src = imgSrc;
+    img.alt = post.title || 'Instagram post';
+    img.className = 'modal-image';
+    img.onerror = () => {
+      container.innerHTML = '<p class="error-message">Image failed to load</p>';
+    };
+    container.appendChild(img);
+    
+    // Try to fetch full-resolution image from Instagram
+    if (post.link) {
+      chrome.runtime.sendMessage({
+        action: 'FETCH_FULL_IMAGE',
+        permalink: post.link,
+        postId: post.id
+      }, (response) => {
+        if (response && response.success && response.imageUrl) {
+          const fullResImg = new Image();
+          fullResImg.onload = () => {
+            img.src = response.imageUrl;
+          };
+          fullResImg.src = response.imageUrl;
+        }
+      });
+    }
+  } else {
+    container.innerHTML = '<p class="no-media">Image not available</p>';
+  }
 }
 
 // Close modal
 function closeModal() {
   const modal = document.getElementById('modal');
   
-  // Stop any playing videos
-  const mediaContainer = modal.querySelector('#modal-media') || modal.querySelector('.modal-media');
+  const mediaContainer = modal.querySelector('#modal-media');
   if (mediaContainer) {
     const videos = mediaContainer.querySelectorAll('video');
     videos.forEach(video => {
       video.pause();
       video.currentTime = 0;
-      video.src = ''; // Clear src to stop loading
+      video.src = '';
     });
   }
   
@@ -897,43 +1032,28 @@ function navigateModal(direction) {
 
 // Update stats
 function updateStats() {
-  document.getElementById('total-count').textContent = `${allPosts.length} posts`;
-  
-  // Calculate current page range
   const startIndex = (currentPage - 1) * postsPerPage;
-  const endIndex = Math.min(startIndex + postsPerPage, filteredPosts.length);
-  const pageCount = endIndex > startIndex ? endIndex - startIndex : 0;
+  const endIndex = Math.min(startIndex + displayedPosts.length, totalPosts);
   
-  document.getElementById('filtered-count').textContent = pageCount > 0 ? `Showing ${startIndex + 1}-${endIndex} of ${filteredPosts.length}` : 'Showing 0';
-  const totalPages = Math.ceil(filteredPosts.length / postsPerPage);
-  document.getElementById('page-info').textContent = totalPages > 0 ? `Page ${currentPage} of ${totalPages}` : 'Page 1';
+  document.getElementById('filtered-count').textContent = totalPosts > 0 
+    ? `Showing ${startIndex + 1}–${endIndex} of ${totalPosts}` 
+    : 'No posts';
   
-  // Update hashtag chips
+  const totalPages = Math.ceil(totalPosts / postsPerPage);
+  document.getElementById('page-info').textContent = totalPages > 0 
+    ? `Page ${currentPage} of ${totalPages}` 
+    : '';
+  
   updateHashtagChips();
 }
 
 // Handle sync
 function handleSync() {
   chrome.runtime.sendMessage({ action: 'SYNC_WITH_INSTAGRAM' });
-  updateSyncStatus('syncing', 'Syncing with Instagram...');
+  updateSyncStatus('syncing', 'Opening Instagram...');
   
-  // Listen for sync completion
-  chrome.runtime.onMessage.addListener(function listener(request) {
-    if (request.action === 'SYNC_COMPLETE') {
-      updateSyncStatus('success', `Sync complete! ${request.syncedCount} posts synced`);
-      loadPosts();
-      setTimeout(() => {
-        updateSyncStatus('', '');
-      }, 3000);
-      chrome.runtime.onMessage.removeListener(listener);
-    } else if (request.action === 'IMPORT_FAILED') {
-      updateSyncStatus('error', 'Sync failed. Please try again.');
-      setTimeout(() => {
-        updateSyncStatus('', '');
-      }, 3000);
-      chrome.runtime.onMessage.removeListener(listener);
-    }
-  });
+  const syncBtn = document.getElementById('sync-btn');
+  if (syncBtn) syncBtn.style.display = 'none';
 }
 
 // Update sync status
@@ -944,84 +1064,19 @@ function updateSyncStatus(status, message) {
   statusEl.style.display = message ? 'block' : 'none';
 }
 
-// Handle clear storage
-function handleClearStorage() {
-  const confirmMessage = `Are you sure you want to clear all stored posts and media?\n\nThis will delete:\n• All saved Instagram posts\n• All images and videos\n• All collections\n\nThis action cannot be undone!`;
-  
-  if (confirm(confirmMessage)) {
-    const clearBtn = document.getElementById('clear-btn');
-    clearBtn.disabled = true;
-    clearBtn.textContent = 'Clearing...';
-    
-    // Clear chrome.storage.local
-    chrome.storage.local.clear(() => {
-      // Clear IndexedDB
-      clearIndexedDB().then(() => {
-        allPosts = [];
-        filteredPosts = [];
-        displayedPosts = [];
-        currentPage = 1;
-        
-        updateSyncStatus('success', 'Storage cleared successfully');
-        applyFilters();
-        renderPosts();
-        
-        clearBtn.disabled = false;
-        clearBtn.textContent = 'Clear Storage';
-        
-        setTimeout(() => {
-          updateSyncStatus('', '');
-        }, 3000);
-      }).catch((error) => {
-        console.error('Error clearing IndexedDB:', error);
-        updateSyncStatus('error', 'Error clearing storage');
-        clearBtn.disabled = false;
-        clearBtn.textContent = 'Clear Storage';
-        setTimeout(() => {
-          updateSyncStatus('', '');
-        }, 3000);
-      });
-    });
-  }
-}
-
-// Clear IndexedDB
-function clearIndexedDB() {
-  return new Promise((resolve, reject) => {
-    const DB_NAME = 'instagram_media_db';
-    const DB_VERSION = 1;
-    
-    const request = indexedDB.deleteDatabase(DB_NAME);
-    
-    request.onsuccess = () => {
-      console.log('IndexedDB cleared successfully');
-      resolve();
-    };
-    
-    request.onerror = () => {
-      console.error('Error clearing IndexedDB:', request.error);
-      reject(request.error);
-    };
-    
-    request.onblocked = () => {
-      console.warn('IndexedDB delete blocked');
-      // Try again after a short delay
-      setTimeout(() => {
-        const retryRequest = indexedDB.deleteDatabase(DB_NAME);
-        retryRequest.onsuccess = () => resolve();
-        retryRequest.onerror = () => reject(retryRequest.error);
-      }, 1000);
-    };
-  });
-}
-
 // Show error
 function showError(message) {
   const container = document.getElementById('posts-container');
   container.innerHTML = `
     <div class="empty-state">
-      <p style="color: var(--error);">${message}</p>
+      <div class="empty-icon">📭</div>
+      <p>${message}</p>
+      <button class="sync-btn-inline" onclick="handleSync()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" width="18" height="18">
+          <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0118.8-4.3M22 12.5a10 10 0 01-18.8 4.3" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        Sync Now
+      </button>
     </div>
   `;
 }
-

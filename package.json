@@ -1,0 +1,20 @@
+{
+  "name": "nostalgia",
+  "version": "1.0.0",
+  "description": "Nostalgia - Your Instagram saved posts viewer",
+  "scripts": {
+    "build": "node build.js",
+    "package": "node build.js && cd dist && powershell Compress-Archive -Path * -DestinationPath ../nostalgia-v1.0.zip -Force"
+  },
+  "keywords": [
+    "chrome-extension",
+    "instagram",
+    "nostalgia"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "sharp": "^0.33.5",
+    "terser": "^5.44.1"
+  }
+}

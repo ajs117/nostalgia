@@ -19,7 +19,7 @@ const defaultRequest = {
   mode: "cors",
 };
 
-const BATCH_SIZE = 21; // Save after each API page (Instagram returns 21 posts per request)
+const BATCH_SIZE = 21;
 const SYNC_PROGRESS_KEY = "instagram_sync_progress";
 
 function createSyncDrawer() {
@@ -28,102 +28,116 @@ function createSyncDrawer() {
   drawer.style.cssText = `
     position: fixed;
     top: 0;
-    right: -380px;
-    width: 380px;
+    right: -400px;
+    width: 400px;
     height: 100%;
-    background: var(--bg-primary, #1a1a1a);
-    color: var(--text-primary, #ffffff);
-    box-shadow: -4px 0 12px rgba(0,0,0,0.5);
-    transition: right 0.3s ease;
+    background: linear-gradient(180deg, #0d0d0d 0%, #1a1a1a 100%);
+    color: #ffffff;
+    box-shadow: -8px 0 32px rgba(0,0,0,0.6);
+    transition: right 0.4s cubic-bezier(0.4, 0, 0.2, 1);
     z-index: 10000;
     padding: 0;
     box-sizing: border-box;
     display: flex;
     flex-direction: column;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    font-family: 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    border-left: 1px solid rgba(255,255,255,0.1);
   `;
 
   // Header with gradient
   const header = document.createElement("div");
   header.style.cssText = `
-    background: linear-gradient(45deg, #f09433 0%, #e6683c 25%, #dc2743 50%, #cc2366 75%, #bc1888 100%);
+    background: linear-gradient(135deg, #833ab4 0%, #fd1d1d 50%, #fcb045 100%);
     color: white;
-    padding: 24px 20px;
-    border-bottom: 1px solid var(--border, #363636);
+    padding: 28px 24px;
+    position: relative;
   `;
   
   const heading = document.createElement("h2");
-  heading.textContent = "Sync Instagram Saved Posts";
+  heading.textContent = "Sync Saved Posts";
   heading.style.cssText = `
     margin: 0;
-    font-size: 20px;
-    font-weight: 600;
+    font-size: 22px;
+    font-weight: 700;
     color: white;
+    letter-spacing: -0.5px;
   `;
+  
+  const subtitle = document.createElement("p");
+  subtitle.textContent = "Import your Instagram saved posts";
+  subtitle.style.cssText = `
+    margin: 6px 0 0 0;
+    font-size: 13px;
+    opacity: 0.9;
+    font-weight: 400;
+  `;
+  
   header.appendChild(heading);
+  header.appendChild(subtitle);
   
   const contentWrapper = document.createElement("div");
   contentWrapper.style.cssText = `
     flex: 1;
-    padding: 20px;
+    padding: 24px;
     overflow-y: auto;
     display: flex;
     flex-direction: column;
-    gap: 16px;
-    background: var(--bg-primary, #1a1a1a);
-    color: var(--text-primary, #ffffff);
+    gap: 20px;
   `;
 
-  // Check if there's saved progress
+  // Check for saved progress
   chrome.storage.local.get([SYNC_PROGRESS_KEY], (result) => {
     if (result[SYNC_PROGRESS_KEY]) {
       const progress = result[SYNC_PROGRESS_KEY];
-      const resumeInfo = document.createElement("p");
+      const resumeInfo = document.createElement("div");
       resumeInfo.id = "resume-info";
       resumeInfo.style.cssText = `
-        margin-bottom: 0;
-        padding: 12px;
-        background-color: rgba(240, 148, 51, 0.2);
-        border-left: 3px solid var(--accent-orange, #f09433);
-        border-radius: 8px;
+        padding: 16px;
+        background: linear-gradient(135deg, rgba(252,176,69,0.15) 0%, rgba(253,29,29,0.1) 100%);
+        border: 1px solid rgba(252,176,69,0.3);
+        border-radius: 12px;
         font-size: 13px;
         line-height: 1.6;
-        color: var(--accent-orange, #f09433);
       `;
       resumeInfo.innerHTML = `
-        <strong>⚠️ Resume available</strong><br>
-        Previous sync: ${progress.synced} synced, ${progress.failed} failed<br>
-        <span style="font-size: 11px; opacity: 0.8;">${new Date(progress.timestamp).toLocaleString()}</span>
+        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+          <span style="font-size: 18px;">⏸️</span>
+          <strong style="color: #fcb045;">Resume available</strong>
+        </div>
+        <div style="color: rgba(255,255,255,0.8);">
+          Previous sync: <strong>${progress.synced}</strong> synced, <strong>${progress.failed}</strong> failed
+        </div>
+        <div style="font-size: 11px; opacity: 0.6; margin-top: 4px;">${new Date(progress.timestamp).toLocaleString()}</div>
       `;
       contentWrapper.insertBefore(resumeInfo, contentWrapper.firstChild);
       
-      // Add clear progress button
       const clearButton = document.createElement("button");
       clearButton.id = "clear-progress-button";
       clearButton.textContent = "Clear & Start Fresh";
       clearButton.style.cssText = `
-        padding: 6px 12px;
-        background-color: transparent;
-        color: var(--accent-orange, #f09433);
-        border: 1px solid var(--accent-orange, #f09433);
-        border-radius: 6px;
+        padding: 8px 14px;
+        background: transparent;
+        color: rgba(255,255,255,0.7);
+        border: 1px solid rgba(255,255,255,0.2);
+        border-radius: 8px;
         cursor: pointer;
-        margin-top: 8px;
+        margin-top: 12px;
         font-size: 12px;
         font-weight: 500;
         transition: all 0.2s;
       `;
       clearButton.addEventListener('mouseenter', () => {
-        clearButton.style.background = 'rgba(240, 148, 51, 0.3)';
+        clearButton.style.background = 'rgba(255,255,255,0.1)';
+        clearButton.style.borderColor = 'rgba(255,255,255,0.3)';
       });
       clearButton.addEventListener('mouseleave', () => {
         clearButton.style.background = 'transparent';
+        clearButton.style.borderColor = 'rgba(255,255,255,0.2)';
       });
       clearButton.addEventListener("click", () => {
-        if (confirm("Clear saved progress and start fresh? This will reset the sync.")) {
+        if (confirm("Clear saved progress and start fresh?")) {
           chrome.storage.local.remove([SYNC_PROGRESS_KEY], () => {
             resumeInfo.remove();
-            clearButton.remove();
           });
         }
       });
@@ -134,7 +148,6 @@ function createSyncDrawer() {
   const syncButton = document.createElement("button");
   syncButton.id = "sync-button";
   
-  // Check for existing posts in database to determine button text and style
   chrome.storage.local.get(["instagramSavedPosts", SYNC_PROGRESS_KEY], (result) => {
     let hasExistingPosts = false;
     try {
@@ -143,71 +156,58 @@ function createSyncDrawer() {
         const posts = JSON.parse(postsData);
         hasExistingPosts = Array.isArray(posts) && posts.length > 0;
       }
-    } catch (error) {
-      console.error("Error checking existing posts:", error);
-    }
+    } catch (error) {}
     
-    // Show resume if there are existing posts OR saved progress
     const hasProgress = result[SYNC_PROGRESS_KEY];
     const shouldResume = hasExistingPosts || hasProgress;
     
     if (shouldResume) {
       syncButton.textContent = "Resume Sync";
       syncButton.style.cssText = `
-        padding: 12px 20px;
-        background: var(--accent-orange, #f09433);
+        padding: 16px 24px;
+        background: linear-gradient(135deg, #fcb045 0%, #fd1d1d 100%);
         color: white;
         border: none;
-        border-radius: 8px;
+        border-radius: 12px;
         cursor: pointer;
-        font-size: 14px;
+        font-size: 15px;
         font-weight: 600;
-        transition: all 0.2s;
+        transition: all 0.3s;
         width: 100%;
-        box-shadow: 0 2px 8px rgba(240, 148, 51, 0.3);
+        box-shadow: 0 4px 20px rgba(252,176,69,0.4);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
       `;
     } else {
       syncButton.textContent = "Start Sync";
       syncButton.style.cssText = `
-        padding: 12px 20px;
-        background: var(--accent-solid, #e1306c);
+        padding: 16px 24px;
+        background: linear-gradient(135deg, #833ab4 0%, #fd1d1d 50%, #fcb045 100%);
         color: white;
         border: none;
-        border-radius: 8px;
+        border-radius: 12px;
         cursor: pointer;
-        font-size: 14px;
+        font-size: 15px;
         font-weight: 600;
-        transition: all 0.2s;
+        transition: all 0.3s;
         width: 100%;
-        box-shadow: 0 2px 8px rgba(225, 48, 108, 0.3);
+        box-shadow: 0 4px 20px rgba(131,58,180,0.4);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
       `;
     }
   });
   
   syncButton.addEventListener('mouseenter', () => {
     if (!syncButton.disabled) {
-      const isResume = syncButton.textContent === "Resume Sync";
-      if (isResume) {
-        syncButton.style.background = '#d97706';
-        syncButton.style.boxShadow = '0 4px 12px rgba(240, 148, 51, 0.4)';
-      } else {
-        syncButton.style.background = 'var(--accent-hover, #c91c56)';
-        syncButton.style.boxShadow = '0 4px 12px rgba(225, 48, 108, 0.4)';
-      }
-      syncButton.style.transform = 'translateY(-1px)';
+      syncButton.style.transform = 'translateY(-2px)';
+      syncButton.style.boxShadow = '0 8px 30px rgba(131,58,180,0.5)';
     }
   });
   syncButton.addEventListener('mouseleave', () => {
     if (!syncButton.disabled) {
-      const isResume = syncButton.textContent === "Resume Sync";
-      if (isResume) {
-        syncButton.style.background = 'var(--accent-orange, #f09433)';
-        syncButton.style.boxShadow = '0 2px 8px rgba(240, 148, 51, 0.3)';
-      } else {
-        syncButton.style.background = 'var(--accent-solid, #e1306c)';
-        syncButton.style.boxShadow = '0 2px 8px rgba(225, 48, 108, 0.3)';
-      }
       syncButton.style.transform = 'translateY(0)';
+      syncButton.style.boxShadow = '0 4px 20px rgba(131,58,180,0.4)';
     }
   });
 
@@ -215,42 +215,40 @@ function createSyncDrawer() {
     chrome.runtime.sendMessage({ action: "START_SYNC" });
     syncButton.textContent = "Syncing...";
     syncButton.disabled = true;
+    syncButton.style.opacity = '0.7';
+    syncButton.style.cursor = 'not-allowed';
     
-    // Add stop button
     const stopButton = document.createElement("button");
     stopButton.id = "stop-sync-button";
     stopButton.textContent = "Stop Sync";
     stopButton.style.cssText = `
-      padding: 12px 20px;
-      background-color: var(--error, #ed4956);
-      color: white;
-      border: none;
-      border-radius: 8px;
+      padding: 14px 24px;
+      background: transparent;
+      color: #ff4757;
+      border: 2px solid #ff4757;
+      border-radius: 12px;
       cursor: pointer;
       font-size: 14px;
       font-weight: 600;
       transition: all 0.2s;
       width: 100%;
-      box-shadow: 0 2px 8px rgba(237, 73, 86, 0.3);
+      margin-top: 12px;
     `;
     stopButton.addEventListener('mouseenter', () => {
       if (!stopButton.disabled) {
-        stopButton.style.background = '#dc2626';
-        stopButton.style.transform = 'translateY(-1px)';
-        stopButton.style.boxShadow = '0 4px 12px rgba(237, 73, 86, 0.4)';
+        stopButton.style.background = 'rgba(255,71,87,0.1)';
       }
     });
     stopButton.addEventListener('mouseleave', () => {
       if (!stopButton.disabled) {
-        stopButton.style.background = 'var(--error, #ed4956)';
-        stopButton.style.transform = 'translateY(0)';
-        stopButton.style.boxShadow = '0 2px 8px rgba(237, 73, 86, 0.3)';
+        stopButton.style.background = 'transparent';
       }
     });
     stopButton.addEventListener("click", () => {
       chrome.runtime.sendMessage({ action: "STOP_SYNC" });
       stopButton.disabled = true;
       stopButton.textContent = "Stopping...";
+      stopButton.style.opacity = '0.5';
     });
     syncButton.insertAdjacentElement('afterend', stopButton);
   });
@@ -259,11 +257,12 @@ function createSyncDrawer() {
   closeButton.textContent = "×";
   closeButton.style.cssText = `
     position: absolute;
-    top: 12px;
-    right: 12px;
-    width: 32px;
-    height: 32px;
-    background: rgba(0, 0, 0, 0.2);
+    top: 16px;
+    right: 16px;
+    width: 36px;
+    height: 36px;
+    background: rgba(0, 0, 0, 0.3);
+    backdrop-filter: blur(10px);
     border: none;
     border-radius: 50%;
     font-size: 24px;
@@ -273,44 +272,160 @@ function createSyncDrawer() {
     display: flex;
     align-items: center;
     justify-content: center;
-    transition: background 0.2s;
+    transition: all 0.2s;
   `;
   closeButton.addEventListener('mouseenter', () => {
-    closeButton.style.background = 'rgba(0, 0, 0, 0.3)';
+    closeButton.style.background = 'rgba(0, 0, 0, 0.5)';
+    closeButton.style.transform = 'scale(1.1)';
   });
   closeButton.addEventListener('mouseleave', () => {
-    closeButton.style.background = 'rgba(0, 0, 0, 0.2)';
+    closeButton.style.background = 'rgba(0, 0, 0, 0.3)';
+    closeButton.style.transform = 'scale(1)';
   });
-
   closeButton.addEventListener("click", () => {
-    drawer.style.right = "-380px";
+    drawer.style.right = "-400px";
   });
 
-  const progressElement = document.createElement("p");
+  // Progress section
+  const progressSection = document.createElement("div");
+  progressSection.style.cssText = `
+    background: rgba(255,255,255,0.05);
+    border-radius: 16px;
+    padding: 20px;
+    border: 1px solid rgba(255,255,255,0.1);
+  `;
+
+  const progressElement = document.createElement("div");
   progressElement.id = "sync-progress";
   progressElement.style.cssText = `
-    margin: 0;
     font-size: 14px;
-    color: var(--text-primary, #ffffff);
+    color: rgba(255,255,255,0.9);
     font-weight: 500;
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
   `;
+  progressElement.innerHTML = `<span style="opacity: 0.6;">Ready to sync</span>`;
+
+  // Progress bar
+  const progressBarContainer = document.createElement("div");
+  progressBarContainer.id = "progress-bar-container";
+  progressBarContainer.style.cssText = `
+    width: 100%;
+    height: 6px;
+    background: rgba(255,255,255,0.1);
+    border-radius: 3px;
+    overflow: hidden;
+    margin-bottom: 16px;
+    display: none;
+  `;
+  
+  const progressBar = document.createElement("div");
+  progressBar.id = "progress-bar";
+  progressBar.style.cssText = `
+    width: 0%;
+    height: 100%;
+    background: linear-gradient(90deg, #833ab4, #fd1d1d, #fcb045);
+    border-radius: 3px;
+    transition: width 0.3s ease;
+  `;
+  progressBarContainer.appendChild(progressBar);
 
   const statsElement = document.createElement("div");
   statsElement.id = "sync-stats";
   statsElement.style.cssText = `
-    padding: 16px;
-    background: #f5f5f5;
-    border-radius: 8px;
-    font-size: 14px;
-    line-height: 1.8;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
   `;
+  statsElement.innerHTML = `
+    <div style="background: rgba(46,213,115,0.1); padding: 14px; border-radius: 10px; text-align: center; border: 1px solid rgba(46,213,115,0.2);">
+      <div style="font-size: 24px; font-weight: 700; color: #2ed573;" id="synced-count">0</div>
+      <div style="font-size: 11px; color: rgba(255,255,255,0.6); text-transform: uppercase; letter-spacing: 0.5px;">Synced</div>
+    </div>
+    <div style="background: rgba(255,71,87,0.1); padding: 14px; border-radius: 10px; text-align: center; border: 1px solid rgba(255,71,87,0.2);">
+      <div style="font-size: 24px; font-weight: 700; color: #ff4757;" id="failed-count">0</div>
+      <div style="font-size: 11px; color: rgba(255,255,255,0.6); text-transform: uppercase; letter-spacing: 0.5px;">Failed</div>
+    </div>
+  `;
+
+  progressSection.appendChild(progressElement);
+  progressSection.appendChild(progressBarContainer);
+  progressSection.appendChild(statsElement);
+
+  // Clear Storage button
+  const clearStorageButton = document.createElement("button");
+  clearStorageButton.id = "clear-storage-button";
+  clearStorageButton.textContent = "Clear All Storage";
+  clearStorageButton.style.cssText = `
+    padding: 12px 20px;
+    background: transparent;
+    color: rgba(255,71,87,0.8);
+    border: 1px solid rgba(255,71,87,0.3);
+    border-radius: 10px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    transition: all 0.2s;
+    width: 100%;
+    margin-top: auto;
+  `;
+  clearStorageButton.addEventListener('mouseenter', () => {
+    if (!clearStorageButton.disabled) {
+      clearStorageButton.style.background = 'rgba(255,71,87,0.1)';
+      clearStorageButton.style.borderColor = 'rgba(255,71,87,0.5)';
+    }
+  });
+  clearStorageButton.addEventListener('mouseleave', () => {
+    if (!clearStorageButton.disabled) {
+      clearStorageButton.style.background = 'transparent';
+      clearStorageButton.style.borderColor = 'rgba(255,71,87,0.3)';
+    }
+  });
+  clearStorageButton.addEventListener("click", () => {
+    const confirmMessage = `Clear all stored data?\n\n• All saved posts\n• All images and videos\n• All collections\n\nThis cannot be undone!`;
+    
+    if (confirm(confirmMessage)) {
+      clearStorageButton.disabled = true;
+      clearStorageButton.textContent = 'Clearing...';
+      
+      chrome.runtime.sendMessage({ action: "CLEAR_STORAGE" }, (response) => {
+        if (chrome.runtime.lastError || !response?.success) {
+          clearStorageButton.disabled = false;
+          clearStorageButton.textContent = 'Clear All Storage';
+          showErrorMessage(drawer, 'Error clearing storage.');
+          return;
+        }
+        
+        clearStorageButton.textContent = 'Cleared!';
+        clearStorageButton.style.borderColor = '#2ed573';
+        clearStorageButton.style.color = '#2ed573';
+        
+        const syncBtn = drawer.querySelector("#sync-button");
+        if (syncBtn) {
+          syncBtn.textContent = "Start Sync";
+        }
+        
+        const resumeInfo = drawer.querySelector("#resume-info");
+        if (resumeInfo) resumeInfo.remove();
+        
+        setTimeout(() => {
+          clearStorageButton.disabled = false;
+          clearStorageButton.textContent = 'Clear All Storage';
+          clearStorageButton.style.borderColor = 'rgba(255,71,87,0.3)';
+          clearStorageButton.style.color = 'rgba(255,71,87,0.8)';
+        }, 2000);
+      });
+    }
+  });
 
   drawer.appendChild(header);
   header.appendChild(closeButton);
   drawer.appendChild(contentWrapper);
   contentWrapper.appendChild(syncButton);
-  contentWrapper.appendChild(progressElement);
-  contentWrapper.appendChild(statsElement);
+  contentWrapper.appendChild(progressSection);
+  contentWrapper.appendChild(clearStorageButton);
   document.body.appendChild(drawer);
 
   return drawer;
@@ -318,104 +433,92 @@ function createSyncDrawer() {
 
 function updateSyncDrawer(syncedCount, failedCount, wasStopped = false) {
   const drawer = document.getElementById("instagram-sync-drawer");
-  if (drawer) {
-    const syncButton = drawer.querySelector("#sync-button");
-    if (syncButton) {
-      if (wasStopped) {
-        syncButton.style.backgroundColor = "#f59e0b";
-        syncButton.textContent = "Resume Sync";
-        syncButton.disabled = false;
-        
-        // Remove old event listeners by cloning
-        const newSyncButton = syncButton.cloneNode(true);
-        syncButton.parentNode.replaceChild(newSyncButton, syncButton);
-        newSyncButton.id = "sync-button";
-        
-        newSyncButton.addEventListener("click", () => {
-          chrome.runtime.sendMessage({ action: "START_SYNC" });
-          newSyncButton.textContent = "Syncing...";
-          newSyncButton.disabled = true;
-          newSyncButton.style.backgroundColor = "#0095f6";
-        });
-        
-        // Re-add hover effects
-        newSyncButton.addEventListener('mouseenter', () => {
-          if (!newSyncButton.disabled) {
-            newSyncButton.style.background = '#d97706';
-          }
-        });
-        newSyncButton.addEventListener('mouseleave', () => {
-          if (!newSyncButton.disabled) {
-            newSyncButton.style.background = '#f59e0b';
-          }
-        });
-      } else {
-        syncButton.textContent = "Sync Complete";
-        syncButton.disabled = true;
-        syncButton.style.backgroundColor = "#0095f6";
-      }
+  if (!drawer) return;
+  
+  const syncButton = drawer.querySelector("#sync-button");
+  if (syncButton) {
+    if (wasStopped) {
+      syncButton.textContent = "Resume Sync";
+      syncButton.disabled = false;
+      syncButton.style.opacity = '1';
+      syncButton.style.cursor = 'pointer';
+      syncButton.style.background = 'linear-gradient(135deg, #fcb045 0%, #fd1d1d 100%)';
+      
+      const newSyncButton = syncButton.cloneNode(true);
+      syncButton.parentNode.replaceChild(newSyncButton, syncButton);
+      newSyncButton.id = "sync-button";
+      
+      newSyncButton.addEventListener("click", () => {
+        chrome.runtime.sendMessage({ action: "START_SYNC" });
+        newSyncButton.textContent = "Syncing...";
+        newSyncButton.disabled = true;
+        newSyncButton.style.opacity = '0.7';
+      });
+    } else {
+      syncButton.textContent = "Sync Complete ✓";
+      syncButton.disabled = true;
+      syncButton.style.background = 'linear-gradient(135deg, #2ed573 0%, #1e90ff 100%)';
     }
+  }
 
-    const stopButton = drawer.querySelector("#stop-sync-button");
-    if (stopButton) {
-      stopButton.remove();
+  const stopButton = drawer.querySelector("#stop-sync-button");
+  if (stopButton) stopButton.remove();
+
+  const progressElement = drawer.querySelector("#sync-progress");
+  if (progressElement) {
+    const totalCount = syncedCount + failedCount;
+    if (wasStopped) {
+      progressElement.innerHTML = `<span style="color: #fcb045;">⏸️ Paused</span> <span style="opacity: 0.6;">${totalCount} posts processed</span>`;
+    } else {
+      progressElement.innerHTML = `<span style="color: #2ed573;">✓ Complete!</span> <span style="opacity: 0.6;">${totalCount} posts processed</span>`;
     }
+  }
 
-    const progressElement = drawer.querySelector("#sync-progress");
-    if (progressElement) {
-      const totalCount = syncedCount + failedCount;
-      if (wasStopped) {
-        progressElement.textContent = `Sync paused. Processed ${totalCount} posts so far.`;
-      } else {
-        progressElement.textContent = `Sync complete! Processed ${totalCount} posts.`;
-      }
-      progressElement.style.color = "";
-    }
+  const progressBarContainer = drawer.querySelector("#progress-bar-container");
+  if (progressBarContainer) {
+    progressBarContainer.style.display = 'none';
+  }
 
-      const statsElement = drawer.querySelector("#sync-stats");
-      if (statsElement) {
-        statsElement.innerHTML = `
-          <div style="color: var(--success, #42c767);"><strong>✓ Synced:</strong> ${syncedCount}</div>
-          <div style="color: ${failedCount > 0 ? 'var(--error, #ed4956)' : 'var(--text-secondary, #a8a8a8)'}"><strong>✗ Failed:</strong> ${failedCount}</div>
-          ${wasStopped ? '<div style="margin-top: 8px; font-size: 12px; opacity: 0.8; color: var(--text-secondary, #a8a8a8);">Progress saved. You can resume later.</div>' : ''}
-        `;
-      }
+  updateStatsDisplay(syncedCount, failedCount);
 
-    const contentWrapper = drawer.querySelector("div[style*='flex: 1']");
-    if (contentWrapper) {
-      const existingReturnButton = drawer.querySelector("#return-button");
-      if (!existingReturnButton) {
-        const returnButton = document.createElement("button");
-        returnButton.id = "return-button";
-        returnButton.textContent = "Return to Extension";
-        returnButton.style.cssText = `
-          padding: 12px 20px;
-          background-color: #0095f6;
-          color: white;
-          border: none;
-          border-radius: 8px;
-          cursor: pointer;
-          font-size: 14px;
-          font-weight: 600;
-          transition: all 0.2s;
-          width: 100%;
-          margin-top: 8px;
-        `;
+  const contentWrapper = drawer.querySelector("div[style*='flex: 1']");
+  if (contentWrapper) {
+    const existingReturnButton = drawer.querySelector("#return-button");
+    if (!existingReturnButton) {
+      const returnButton = document.createElement("button");
+      returnButton.id = "return-button";
+      returnButton.textContent = "View Your Posts →";
+      returnButton.style.cssText = `
+        padding: 16px 24px;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        border: none;
+        border-radius: 12px;
+        cursor: pointer;
+        font-size: 15px;
+        font-weight: 600;
+        transition: all 0.3s;
+        width: 100%;
+        margin-top: 12px;
+        box-shadow: 0 4px 20px rgba(102,126,234,0.4);
+      `;
       returnButton.addEventListener('mouseenter', () => {
-        returnButton.style.background = 'var(--accent-hover, #c91c56)';
-        returnButton.style.transform = 'translateY(-1px)';
-        returnButton.style.boxShadow = '0 4px 12px rgba(225, 48, 108, 0.4)';
+        returnButton.style.transform = 'translateY(-2px)';
+        returnButton.style.boxShadow = '0 8px 30px rgba(102,126,234,0.5)';
       });
       returnButton.addEventListener('mouseleave', () => {
-        returnButton.style.background = 'var(--accent-solid, #e1306c)';
         returnButton.style.transform = 'translateY(0)';
-        returnButton.style.boxShadow = '0 2px 8px rgba(225, 48, 108, 0.3)';
+        returnButton.style.boxShadow = '0 4px 20px rgba(102,126,234,0.4)';
       });
-        returnButton.addEventListener("click", () => {
-          chrome.runtime.sendMessage({ action: "RETURN_TO_EXTENSION" });
-          // Close the drawer after clicking the return button
-          drawer.style.right = "-380px";
-        });
+      returnButton.addEventListener("click", () => {
+        chrome.runtime.sendMessage({ action: "RETURN_TO_EXTENSION" });
+        drawer.style.right = "-400px";
+      });
+      
+      const syncBtn = drawer.querySelector("#sync-button");
+      if (syncBtn) {
+        syncBtn.insertAdjacentElement('afterend', returnButton);
+      } else {
         contentWrapper.appendChild(returnButton);
       }
     }
@@ -424,6 +527,42 @@ function updateSyncDrawer(syncedCount, failedCount, wasStopped = false) {
 
 function showDrawer(drawer) {
   drawer.style.right = "0";
+}
+
+function showErrorMessage(drawer, message) {
+  const existingError = drawer.querySelector(".error-message");
+  if (existingError) existingError.remove();
+  
+  const errorMsg = document.createElement("div");
+  errorMsg.className = "error-message";
+  errorMsg.textContent = message;
+  errorMsg.style.cssText = `
+    padding: 14px 18px;
+    background: rgba(255,71,87,0.1);
+    border: 1px solid rgba(255,71,87,0.3);
+    border-radius: 10px;
+    color: #ff4757;
+    font-size: 14px;
+    margin-top: 12px;
+  `;
+  
+  const contentWrapper = drawer.querySelector("div[style*='flex: 1']");
+  const syncButton = drawer.querySelector("#sync-button");
+  if (contentWrapper && syncButton) {
+    syncButton.insertAdjacentElement('afterend', errorMsg);
+  }
+  
+  setTimeout(() => {
+    if (errorMsg.parentNode) errorMsg.remove();
+  }, 5000);
+}
+
+function updateStatsDisplay(synced, failed) {
+  const syncedEl = document.getElementById("synced-count");
+  const failedEl = document.getElementById("failed-count");
+  
+  if (syncedEl) syncedEl.textContent = synced;
+  if (failedEl) failedEl.textContent = failed;
 }
 
 async function fetchSavedPosts(maxId = "") {
@@ -450,8 +589,6 @@ async function fetchSavedPosts(maxId = "") {
   }
 }
 
-// Media functions removed - we now store URLs directly instead of downloading blobs
-
 async function fetchCollections() {
   let allCollections = [];
   let moreAvailable = true;
@@ -468,9 +605,7 @@ async function fetchCollections() {
       });
 
       if (response.status !== 200) {
-        throw new Error(
-          `Failed to get collections. Status: ${response.status} ${response.statusText}`
-        );
+        throw new Error(`Failed to get collections. Status: ${response.status}`);
       }
 
       const data = await response.json();
@@ -482,7 +617,6 @@ async function fetchCollections() {
       moreAvailable = data.more_available;
       maxId = data.next_max_id || "";
 
-      // Optional: Add a small delay to avoid rate limiting
       await new Promise((resolve) => setTimeout(resolve, 1000));
     } catch (error) {
       console.error(`Error fetching collections: ${error.message}`);
@@ -493,9 +627,102 @@ async function fetchCollections() {
   return allCollections;
 }
 
+function getSavedTimestamp(post) {
+  let savedTimestamp = post.saved_at || post.savedAt || post.saved_timestamp;
+  
+  if (!savedTimestamp) {
+    savedTimestamp = post.taken_at;
+  }
+  
+  if (savedTimestamp && savedTimestamp < 10000000000) {
+    savedTimestamp = savedTimestamp * 1000;
+  }
+  
+  return savedTimestamp || Date.now();
+}
+
+function createPostElement(post, postId, url, thumbnailBase64, carouselMedia = null) {
+  // media_type: 1 = photo, 2 = video, 8 = carousel
+  const isCarousel = post.media_type === 8;
+  const isVideo = post.media_type === 2;
+  
+  return {
+    id: postId,
+    url,
+    thumbnail: thumbnailBase64,
+    title: post.caption?.text ?? `${post.user.username} post`,
+    username: post.user.username,
+    collectionIds: post.saved_collection_ids || [],
+    isVideo: isVideo,
+    isCarousel: isCarousel,
+    carouselMedia: carouselMedia,
+    carouselCount: isCarousel && carouselMedia ? carouselMedia.length : 0,
+    videoUrl: null,
+    timestamp: getSavedTimestamp(post),
+    takenAt: post.taken_at || Date.now(),
+  };
+}
+
+async function processPost(post) {
+  const url = `https://www.instagram.com/p/${post.code}/`;
+  const postId = post.id || `${post.user.username}-${post.code}`;
+  
+  // Check if this is a carousel post (media_type === 8)
+  const isCarousel = post.media_type === 8;
+  let carouselMedia = null;
+  let thumbnailUrl = null;
+  
+  if (isCarousel && post.carousel_media && post.carousel_media.length > 0) {
+    // Process carousel items
+    carouselMedia = post.carousel_media.map((item, index) => {
+      const itemIsVideo = item.media_type === 2;
+      return {
+        id: item.id || `${postId}-${index}`,
+        index: index,
+        isVideo: itemIsVideo,
+        // Get the best quality image for the thumbnail
+        imageUrl: item.image_versions2?.candidates?.[0]?.url || null,
+        // For videos, also store video info
+        videoVersions: itemIsVideo ? (item.video_versions || []) : null,
+        width: item.original_width || item.image_versions2?.candidates?.[0]?.width || 0,
+        height: item.original_height || item.image_versions2?.candidates?.[0]?.height || 0,
+      };
+    });
+    
+    // Use first carousel item as the main thumbnail
+    thumbnailUrl = carouselMedia[0]?.imageUrl || null;
+  } else {
+    // Single image or video post
+    thumbnailUrl = post.image_versions2?.candidates?.[0]?.url || null;
+  }
+  
+  let thumbnailBase64 = null;
+  if (thumbnailUrl) {
+    try {
+      thumbnailBase64 = await downloadAndCompressThumbnail(thumbnailUrl, postId);
+    } catch (thumbError) {
+      console.error(`Error processing thumbnail for ${postId}:`, thumbError);
+    }
+  }
+  
+  return createPostElement(post, postId, url, thumbnailBase64, carouselMedia);
+}
+
+async function saveBatchIfFull(batchBuffer, syncedCount, failedCount, currentMinId, savedMinId, savedMaxId, maxId) {
+  if (batchBuffer.length >= BATCH_SIZE) {
+    const result = await saveBatch(batchBuffer);
+    const addedCount = result?.added || batchBuffer.length;
+    syncedCount += addedCount;
+    batchBuffer.length = 0;
+    await saveProgress(currentMinId || savedMinId || "", maxId || savedMaxId || "", syncedCount, failedCount);
+    updateSyncProgress(syncedCount, failedCount);
+    return syncedCount;
+  }
+  return syncedCount;
+}
+
 async function downloadAndCompressThumbnail(imageUrl, postId) {
   try {
-    // Download the image
     const response = await fetch(imageUrl, { mode: 'cors', credentials: 'omit' });
     if (!response.ok) {
       throw new Error(`Failed to download: ${response.status}`);
@@ -503,18 +730,15 @@ async function downloadAndCompressThumbnail(imageUrl, postId) {
     
     const blob = await response.blob();
     
-    // Create an image element to load and compress
     return new Promise((resolve, reject) => {
       const img = new Image();
       img.crossOrigin = 'anonymous';
       
       img.onload = () => {
-        // Create canvas for compression
         const canvas = document.createElement('canvas');
-        const maxSize = 320;
-        const quality = 0.7;
+        const maxSize = 280;
+        const quality = 0.65;
         
-        // Calculate new dimensions maintaining aspect ratio
         let width = img.width;
         let height = img.height;
         if (width > height) {
@@ -532,11 +756,9 @@ async function downloadAndCompressThumbnail(imageUrl, postId) {
         canvas.width = width;
         canvas.height = height;
         
-        // Draw and compress
         const ctx = canvas.getContext('2d');
         ctx.drawImage(img, 0, 0, width, height);
         
-        // Convert directly to base64 data URL
         const base64DataUrl = canvas.toDataURL('image/jpeg', quality);
         resolve(base64DataUrl);
       };
@@ -554,95 +776,149 @@ async function getInstagramSavedPosts() {
   try {
     isSyncing = true;
     
-    // Check for saved progress
     const savedProgress = await new Promise((resolve) => {
       chrome.storage.local.get([SYNC_PROGRESS_KEY], (result) => {
         resolve(result[SYNC_PROGRESS_KEY] || null);
       });
     });
 
-    // Resume from saved progress or start fresh
-    syncedCount = savedProgress?.synced || 0;
-    failedCount = savedProgress?.failed || 0;
+    // Get existing post info for duplicate checking
+    const existingPostsInfo = await new Promise((resolve) => {
+      chrome.runtime.sendMessage({ action: "GET_POSTS_INFO" }, (response) => {
+        if (chrome.runtime.lastError) {
+          resolve({ count: 0, ids: [], links: [] });
+        } else {
+          resolve(response || { count: 0, ids: [], links: [] });
+        }
+      });
+    });
     
-    console.log(savedProgress ? `Resuming sync from: ${syncedCount} synced, ${failedCount} failed` : 'Starting fresh sync');
+    // Use Sets for O(1) lookup
+    const existingPostIds = new Set(existingPostsInfo.ids || []);
+    const existingPostLinks = new Set(existingPostsInfo.links || []);
+    
+    if (savedProgress) {
+      syncedCount = savedProgress.synced || 0;
+      failedCount = savedProgress.failed || 0;
+    } else if (existingPostsInfo.count > 0) {
+      syncedCount = existingPostsInfo.count;
+      failedCount = 0;
+    } else {
+      syncedCount = 0;
+      failedCount = 0;
+    }
+
+    // Show progress bar
+    const progressBarContainer = document.getElementById("progress-bar-container");
+    if (progressBarContainer) {
+      progressBarContainer.style.display = 'block';
+    }
 
     const collections = await fetchCollections();
     
-    // Send collections immediately
     chrome.runtime.sendMessage({
       action: "SAVE_COLLECTIONS",
       collections: collections,
     });
     
-    let maxId = savedProgress?.maxId || "";
+    let savedMinId = savedProgress?.minId || "";
+    let savedMaxId = savedProgress?.maxId || "";
+    let currentMinId = "";
+    let maxId = "";
     let moreAvailable = true;
     let retryCount = 0;
     const maxRetries = 3;
     let batchBuffer = [];
+    let checkingNewPosts = !!savedMinId;
+    let totalPostsFound = 0;
     
-    // Update UI with initial state
     updateSyncProgress(syncedCount, failedCount);
+    maxId = "";
 
     while (moreAvailable && isSyncing) {
       try {
         const savedPosts = await fetchSavedPosts(maxId);
-        maxId = savedPosts.next_max_id;
-
-        for (const post of savedPosts.items) {
-          try {
-            // Use permanent Instagram post URL (permalink)
-            const url = `https://www.instagram.com/p/${post.code}/`;
-            const postId = post.id || `${post.user.username}-${post.code}`;
+        
+        if (savedPosts.items && savedPosts.items.length > 0 && maxId === "") {
+          const firstPost = savedPosts.items[0];
+          if (firstPost && firstPost.id) {
+            currentMinId = firstPost.id;
+          }
+          
+          // Estimate total for progress
+          totalPostsFound = savedPosts.items.length;
+        }
+        
+        // Skip posts that already exist
+        const newPostsInBatch = savedPosts.items.filter(post => {
+          const postId = post.id || `${post.user?.username}-${post.code}`;
+          const postUrl = `https://www.instagram.com/p/${post.code}/`;
+          return !existingPostIds.has(postId) && !existingPostLinks.has(postUrl);
+        });
+        
+        // Check if we've caught up with existing posts
+        if (checkingNewPosts && savedMinId && savedPosts.items.length > 0) {
+          const foundSavedPostIndex = savedPosts.items.findIndex(p => {
+            const postId = p.id || `${p.user?.username}-${p.code}`;
+            return postId === savedMinId;
+          });
+          
+          if (foundSavedPostIndex >= 0) {
+            const newPostsBeforeSaved = savedPosts.items.slice(0, foundSavedPostIndex);
             
-            // Get thumbnail URL
-            const thumbnailUrl = post.image_versions2?.candidates?.[0]?.url || null;
-            
-            // Download and compress thumbnail, convert to base64
-            let thumbnailBase64 = null;
-            if (thumbnailUrl) {
+            for (const post of newPostsBeforeSaved) {
               try {
-                thumbnailBase64 = await downloadAndCompressThumbnail(thumbnailUrl, postId);
-              } catch (thumbError) {
-                console.error(`Error processing thumbnail for ${postId}:`, thumbError);
-                // Continue without thumbnail
+                const element = await processPost(post);
+                batchBuffer.push(element);
+                
+                // Add to our local tracking
+                existingPostIds.add(element.id);
+                existingPostLinks.add(element.url);
+                
+                syncedCount = await saveBatchIfFull(batchBuffer, syncedCount, failedCount, currentMinId, savedMinId, savedMaxId, maxId);
+              } catch (postError) {
+                console.error(`Error processing post ${post.code}:`, postError);
+                failedCount++;
+                updateSyncProgress(syncedCount, failedCount);
               }
             }
             
-            const element = {
-              id: postId,
-              url, // Permanent Instagram post permalink
-              thumbnail: thumbnailBase64, // Base64 data URL stored directly
-              title: post.caption?.text ?? `${post.user.username} post`,
-              username: post.user.username,
-              collectionIds: post.saved_collection_ids || [],
-              isVideo: post.media_type === 2,
-              videoUrl: null, // Don't store duplicate permalink, use url field instead
-              timestamp: post.taken_at || Date.now(), // Store timestamp for sorting
-            };
-            
-            batchBuffer.push(element);
-            
-            // Save batch when buffer is full
-            if (batchBuffer.length >= BATCH_SIZE) {
-              await saveBatch(batchBuffer);
-              syncedCount += batchBuffer.length;
-              batchBuffer = [];
+            checkingNewPosts = false;
+            if (savedMaxId) {
+              maxId = savedMaxId;
+              savedMinId = "";
+              continue;
+            } else {
+              savedMinId = "";
+            }
+          }
+        }
+        
+        if (checkingNewPosts || !savedMinId) {
+          maxId = savedPosts.next_max_id;
+          
+          for (const post of newPostsInBatch) {
+            try {
+              const element = await processPost(post);
+              batchBuffer.push(element);
               
-              // Save progress
-              await saveProgress(maxId, syncedCount, failedCount);
+              // Add to our local tracking
+              existingPostIds.add(element.id);
+              existingPostLinks.add(element.url);
+              
+              syncedCount = await saveBatchIfFull(batchBuffer, syncedCount, failedCount, currentMinId, savedMinId, savedMaxId, maxId);
+            } catch (postError) {
+              console.error(`Error processing post ${post.code}:`, postError);
+              failedCount++;
               updateSyncProgress(syncedCount, failedCount);
             }
-          } catch (postError) {
-            console.error(`Error processing post ${post.code}:`, postError);
-            failedCount++;
-            updateSyncProgress(syncedCount, failedCount);
           }
         }
 
-        await new Promise((resolve) => setTimeout(resolve, 2000));
+        await new Promise((resolve) => setTimeout(resolve, 1500));
         moreAvailable = savedPosts.more_available;
         retryCount = 0;
+        
       } catch (error) {
         console.error(`Error in fetch loop: ${error.message}`);
         retryCount++;
@@ -654,14 +930,14 @@ async function getInstagramSavedPosts() {
       }
     }
 
-    // Save remaining posts in buffer
+    // Save remaining posts
     if (batchBuffer.length > 0) {
       await saveBatch(batchBuffer);
       syncedCount += batchBuffer.length;
+      await saveProgress(currentMinId || savedMinId || "", maxId || savedMaxId || "", syncedCount, failedCount);
       updateSyncProgress(syncedCount, failedCount);
     }
 
-    // Clear progress on completion
     await clearProgress();
     
     isSyncing = false;
@@ -688,11 +964,12 @@ async function saveBatch(posts) {
   });
 }
 
-async function saveProgress(maxId, synced, failed) {
+async function saveProgress(minId, maxId, synced, failed) {
   return new Promise((resolve) => {
     chrome.storage.local.set({
       [SYNC_PROGRESS_KEY]: {
-        maxId,
+        minId: minId || "",
+        maxId: maxId || "",
         synced,
         failed,
         timestamp: Date.now(),
@@ -709,30 +986,39 @@ async function clearProgress() {
 
 function updateSyncProgress(synced, failed) {
   const drawer = document.getElementById("instagram-sync-drawer");
-  if (drawer) {
-    const progressElement = drawer.querySelector("#sync-progress");
-    if (progressElement) {
-      progressElement.textContent = `Processing posts...`;
-    }
-    
-    const statsElement = drawer.querySelector("#sync-stats");
-    if (statsElement) {
-      statsElement.innerHTML = `
-        <div style="color: var(--success, #42c767); margin-bottom: 8px;"><strong>✓ Synced:</strong> ${synced}</div>
-        <div style="color: ${failed > 0 ? 'var(--error, #ed4956)' : 'var(--text-secondary, #a8a8a8)'}"><strong>✗ Failed:</strong> ${failed}</div>
-      `;
-    }
+  if (!drawer) return;
+  
+  const progressElement = drawer.querySelector("#sync-progress");
+  if (progressElement) {
+    progressElement.innerHTML = `
+      <span class="pulse-dot" style="width: 8px; height: 8px; background: #2ed573; border-radius: 50%; animation: pulse 1.5s infinite;"></span>
+      <span>Syncing posts...</span>
+    `;
   }
+  
+  // Add pulse animation if not exists
+  if (!document.getElementById('pulse-animation')) {
+    const style = document.createElement('style');
+    style.id = 'pulse-animation';
+    style.textContent = `
+      @keyframes pulse {
+        0%, 100% { opacity: 1; transform: scale(1); }
+        50% { opacity: 0.5; transform: scale(0.8); }
+      }
+    `;
+    document.head.appendChild(style);
+  }
+  
+  updateStatsDisplay(synced, failed);
 }
 
 chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
   if (request.action === "SHOW_SYNC_DRAWER") {
-    // Check if drawer already exists
     let drawer = document.getElementById("instagram-sync-drawer");
     if (!drawer) {
       drawer = createSyncDrawer();
     }
-    setTimeout(() => showDrawer(drawer), 1000);
+    setTimeout(() => showDrawer(drawer), 500);
   } else if (request.action === "SYNC_COMPLETE") {
     updateSyncDrawer(request.syncedCount, request.failedCount, false);
   } else if (request.action === "IMPORT_INSTAGRAM_POSTS") {
@@ -740,10 +1026,8 @@ chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
       const result = await getInstagramSavedPosts();
       
       if (!isSyncing) {
-        // Sync was stopped
         updateSyncDrawer(result.syncedCount, result.failedCount, true);
       } else {
-        // Sync completed normally
         chrome.runtime.sendMessage({
           action: "SYNC_FINISHED",
           syncedCount: result.syncedCount,
@@ -757,36 +1041,32 @@ chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
         error: error.message,
       });
       
-      // Show error in drawer
       const drawer = document.getElementById("instagram-sync-drawer");
       if (drawer) {
         const progressElement = drawer.querySelector("#sync-progress");
         if (progressElement) {
-          progressElement.textContent = `Error: ${error.message}`;
-          progressElement.style.color = "var(--error, #ed4956)";
+          progressElement.innerHTML = `<span style="color: #ff4757;">✗ Error: ${error.message}</span>`;
         }
         
         const syncButton = drawer.querySelector("#sync-button");
         if (syncButton) {
-          syncButton.textContent = "Sync Failed";
+          syncButton.textContent = "Retry Sync";
           syncButton.disabled = false;
+          syncButton.style.opacity = '1';
         }
         
         const stopButton = drawer.querySelector("#stop-sync-button");
-        if (stopButton) {
-          stopButton.remove();
-        }
+        if (stopButton) stopButton.remove();
       }
     }
   } else if (request.action === "STOP_SYNC") {
     isSyncing = false;
     
-    // Update UI to show stopping
     const drawer = document.getElementById("instagram-sync-drawer");
     if (drawer) {
       const progressElement = drawer.querySelector("#sync-progress");
       if (progressElement) {
-        progressElement.textContent = `Stopping sync... (${syncedCount} synced, ${failedCount} failed so far)`;
+        progressElement.innerHTML = `<span style="color: #fcb045;">Stopping...</span> <span style="opacity: 0.6;">(${syncedCount} synced, ${failedCount} failed)</span>`;
       }
     }
   }
@@ -794,14 +1074,9 @@ chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
 
 (function () {
   if (window.location.hostname === "www.instagram.com") {
-    console.log("Instagram page detected. Ready for sync.");
-    
-    // Check for saved progress on page load
     chrome.storage.local.get([SYNC_PROGRESS_KEY], (result) => {
       if (result[SYNC_PROGRESS_KEY]) {
-        // Small delay to ensure page is fully loaded
         setTimeout(() => {
-          // Check if drawer already exists
           let drawer = document.getElementById("instagram-sync-drawer");
           if (!drawer) {
             drawer = createSyncDrawer();
