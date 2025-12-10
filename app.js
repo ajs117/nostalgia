@@ -1,6 +1,5 @@
 // App state
 let allPosts = [];
-let filteredPosts = [];
 let displayedPosts = [];
 let currentPage = 1;
 let postsPerPage = 20; // Will be adjusted for complete rows
@@ -8,14 +7,11 @@ let currentSort = 'newest-saved';
 let currentTypeFilter = 'all';
 let currentHashtagFilter = null;
 let currentSearchQuery = '';
-let randomSeed = Date.now();
 let currentModalIndex = -1;
 let currentCarouselIndex = 0; // Track which item in a carousel is being viewed
 let isLoading = false;
 let totalPosts = 0;
-let hasMorePosts = true;
 let isSyncing = false;
-let syncTabId = null;
 
 // Debounce helper
 function debounce(func, wait) {
@@ -31,7 +27,7 @@ function debounce(func, wait) {
 }
 
 // Helper functions for creating media elements
-function createVideoElement(src, useCrossOrigin = false) {
+function createVideoElement(src) {
   const video = document.createElement('video');
   video.src = src;
   video.preload = 'metadata';
@@ -39,20 +35,17 @@ function createVideoElement(src, useCrossOrigin = false) {
   video.style.width = '100%';
   video.style.height = '100%';
   video.style.objectFit = 'cover';
-  if (useCrossOrigin) {
-    video.crossOrigin = 'anonymous';
-  }
   video.onerror = () => {
-    console.error(`Video playback error:`, src);
+    console.error('Video playback error:', src);
     video.parentElement.innerHTML = '<div class="media-error">Video failed to load</div>';
   };
   return video;
 }
 
-function createImageElement(src, useCrossOrigin = false) {
+function createImageElement(src) {
   const img = document.createElement('img');
   const placeholder = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="280" height="280"%3E%3Crect fill="%231a1a1a" width="280" height="280"/%3E%3Ctext x="50%25" y="50%25" text-anchor="middle" dy=".3em" fill="%23666" font-family="system-ui"%3ENo image%3C/text%3E%3C/svg%3E';
-  
+
   if (!src) {
     img.src = placeholder;
   } else if (typeof src === 'string' && src.startsWith('data:')) {
@@ -69,7 +62,7 @@ function createImageElement(src, useCrossOrigin = false) {
   } else {
     img.src = placeholder;
   }
-  
+
   return img;
 }
 
@@ -106,11 +99,11 @@ document.addEventListener('DOMContentLoaded', () => {
   setupMessageListener();
   setupMobileFilters();
   setupSyncPanel();
-  
+
   // Clear any stale sync status on fresh page load
   // The status will be updated if there's an active sync via messages
   updateSyncStatus('', '');
-  
+
   // Recalculate on resize
   let resizeTimeout;
   window.addEventListener('resize', () => {
@@ -132,29 +125,29 @@ function initializeEventListeners() {
   if (searchInput) {
     searchInput.addEventListener('input', debounce(handleSearch, 300));
   }
-  
+
   // Desktop filters
   const sortSelect = document.getElementById('sort-select');
   const typeFilter = document.getElementById('type-filter');
   if (sortSelect) sortSelect.addEventListener('change', handleSortChange);
   if (typeFilter) typeFilter.addEventListener('change', handleTypeFilterChange);
-  
+
   // Mobile search
   const searchInputMobile = document.getElementById('search-input-mobile');
   if (searchInputMobile) {
     searchInputMobile.addEventListener('input', debounce(handleSearchMobile, 300));
   }
-  
+
   // Mobile filters
   const sortSelectMobile = document.getElementById('sort-select-mobile');
   const typeFilterMobile = document.getElementById('type-filter-mobile');
   if (sortSelectMobile) sortSelectMobile.addEventListener('change', handleSortChangeMobile);
   if (typeFilterMobile) typeFilterMobile.addEventListener('change', handleTypeFilterChangeMobile);
-  
+
   // Sync button - now opens sync panel
   const syncBtn = document.getElementById('sync-btn');
   if (syncBtn) syncBtn.addEventListener('click', openSyncPanel);
-  
+
   // Modal
   document.getElementById('modal-close').addEventListener('click', closeModal);
   document.getElementById('modal').addEventListener('click', (e) => {
@@ -179,21 +172,21 @@ function setupMobileFilters() {
   const drawer = document.getElementById('mobile-filters-drawer');
   const overlay = document.getElementById('drawer-overlay');
   const closeBtn = document.getElementById('close-filters');
-  
+
   if (!toggle || !drawer || !overlay) return;
-  
+
   toggle.addEventListener('click', () => {
     drawer.classList.add('open');
     overlay.classList.add('open');
     document.body.style.overflow = 'hidden';
   });
-  
+
   const closeDrawer = () => {
     drawer.classList.remove('open');
     overlay.classList.remove('open');
     document.body.style.overflow = '';
   };
-  
+
   if (closeBtn) closeBtn.addEventListener('click', closeDrawer);
   overlay.addEventListener('click', closeDrawer);
 }
@@ -201,11 +194,11 @@ function setupMobileFilters() {
 // Load posts with pagination from background
 function loadPosts(append = false, fetchHashtagsAfter = false) {
   if (isLoading) return;
-  
+
   isLoading = true;
   showLoadingState();
-  
-  chrome.runtime.sendMessage({ 
+
+  chrome.runtime.sendMessage({
     action: 'GET_INSTAGRAM_POSTS',
     page: currentPage,
     limit: postsPerPage,
@@ -216,7 +209,7 @@ function loadPosts(append = false, fetchHashtagsAfter = false) {
   }, (response) => {
     isLoading = false;
     hideLoadingState();
-    
+
     if (chrome.runtime.lastError) {
       console.error('Error loading posts:', chrome.runtime.lastError);
       showError('Failed to load posts');
@@ -230,17 +223,16 @@ function loadPosts(append = false, fetchHashtagsAfter = false) {
         allPosts = response.posts || [];
       }
       totalPosts = response.total || 0;
-      hasMorePosts = response.hasMore || false;
-      
+
       // Apply local filters (like hashtag) after loading
       applyLocalFilters();
       renderPagination();
-      
+
       // Show hashtags from current page immediately (fallback)
       if (allHashtagsCache.length === 0 && allPosts.length > 0) {
         updateHashtagsFromCurrentPosts();
       }
-      
+
       // Fetch hashtags after posts are loaded (service worker is ready)
       if (fetchHashtagsAfter) {
         fetchAllHashtags();
@@ -253,7 +245,7 @@ function loadPosts(append = false, fetchHashtagsAfter = false) {
       allPosts = [];
       totalPosts = 0;
       renderPosts();
-      
+
       // Still try to fetch hashtags even if no posts on this page
       if (fetchHashtagsAfter) {
         fetchAllHashtags();
@@ -265,7 +257,7 @@ function loadPosts(append = false, fetchHashtagsAfter = false) {
 // Show loading state
 function showLoadingState() {
   const container = document.getElementById('posts-container');
-  
+
   if (container.children.length === 0) {
     container.innerHTML = '';
     for (let i = 0; i < 15; i++) {
@@ -290,7 +282,7 @@ function hideLoadingState() {
 
 // Message listener for live updates
 function setupMessageListener() {
-  chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  chrome.runtime.onMessage.addListener((request) => {
     if (request.action === 'UPDATE_ITEMS') {
       // Don't reset page during sync - preserve user's current page position
       loadPosts();
@@ -339,9 +331,6 @@ function handleSortChange(e) {
   const mobileSelect = document.getElementById('sort-select-mobile');
   if (mobileSelect) mobileSelect.value = e.target.value;
   currentPage = 1;
-  if (currentSort === 'random') {
-    randomSeed = Date.now();
-  }
   loadPosts();
 }
 
@@ -351,9 +340,6 @@ function handleSortChangeMobile(e) {
   const desktopSelect = document.getElementById('sort-select');
   if (desktopSelect) desktopSelect.value = e.target.value;
   currentPage = 1;
-  if (currentSort === 'random') {
-    randomSeed = Date.now();
-  }
   loadPosts();
 }
 
@@ -391,7 +377,6 @@ function handleHashtagClick(hashtag) {
 function applyLocalFilters() {
   // All filtering (type, search, hashtag) is now done at the database level
   // This function just sets up the display arrays
-  filteredPosts = allPosts;
   displayedPosts = allPosts;
   renderPosts();
   updateStats();
@@ -416,7 +401,7 @@ function fetchAllHashtags() {
       updateHashtagsFromCurrentPosts();
       return;
     }
-    
+
     if (response && response.success && Array.isArray(response.hashtags)) {
       allHashtagsCache = response.hashtags;
       updateHashtagChips();
@@ -456,12 +441,12 @@ function updateHashtagChips() {
     document.getElementById('hashtag-chips'),
     document.getElementById('hashtag-chips-mobile')
   ].filter(Boolean);
-  
+
   const hashtagsWithCounts = getHashtagsWithCounts();
-  
+
   containers.forEach(container => {
     container.innerHTML = '';
-    
+
     if (hashtagsWithCounts.length === 0) {
       container.innerHTML = '<span class="no-hashtags">No hashtags found</span>';
       return;
@@ -481,14 +466,14 @@ function updateHashtagChips() {
 function renderPagination() {
   const container = document.getElementById('pagination');
   const totalPages = Math.max(1, Math.ceil(totalPosts / postsPerPage));
-  
+
   if (totalPages <= 1) {
     container.innerHTML = '';
     return;
   }
 
   container.innerHTML = '';
-  
+
   // Previous button
   const prevBtn = document.createElement('button');
   prevBtn.innerHTML = '← Prev';
@@ -506,7 +491,7 @@ function renderPagination() {
   const maxVisible = 7;
   let startPage = Math.max(1, currentPage - Math.floor(maxVisible / 2));
   let endPage = Math.min(totalPages, startPage + maxVisible - 1);
-  
+
   if (endPage - startPage < maxVisible - 1) {
     startPage = Math.max(1, endPage - maxVisible + 1);
   }
@@ -520,7 +505,7 @@ function renderPagination() {
       window.scrollTo({ top: 0, behavior: 'smooth' });
     });
     container.appendChild(firstBtn);
-    
+
     if (startPage > 2) {
       const ellipsis = document.createElement('span');
       ellipsis.className = 'pagination-ellipsis';
@@ -548,7 +533,7 @@ function renderPagination() {
       ellipsis.textContent = '...';
       container.appendChild(ellipsis);
     }
-    
+
     const lastBtn = document.createElement('button');
     lastBtn.textContent = totalPages;
     lastBtn.addEventListener('click', () => {
@@ -576,7 +561,7 @@ function renderPagination() {
 // Render posts
 function renderPosts() {
   const container = document.getElementById('posts-container');
-  
+
   if (displayedPosts.length === 0) {
     container.innerHTML = `
       <div class="empty-state">
@@ -589,7 +574,7 @@ function renderPosts() {
   }
 
   const fragment = document.createDocumentFragment();
-  
+
   displayedPosts.forEach((post, index) => {
     const card = createPostCard(post, index);
     fragment.appendChild(card);
@@ -614,7 +599,7 @@ function createPostCard(post, index) {
   if (imgSrc && typeof imgSrc === 'string' && imgSrc.startsWith('data:')) {
     const img = createImageElement(imgSrc);
     mediaContainer.appendChild(img);
-    
+
     // Show carousel indicator for multi-item posts
     if (post.isCarousel && post.carouselCount > 1) {
       const indicator = document.createElement('div');
@@ -655,12 +640,12 @@ function createPostCard(post, index) {
 
   const info = document.createElement('div');
   info.className = 'post-info';
-  
+
   const username = document.createElement('div');
   username.className = 'post-username';
   username.textContent = `@${post.username || 'unknown'}`;
   info.appendChild(username);
-  
+
   const title = document.createElement('div');
   title.className = 'post-title';
   title.textContent = truncateText(post.title || '', 50);
@@ -700,10 +685,10 @@ function truncateText(text, maxLength) {
 // Open modal
 function openModal(index, carouselIdx = 0) {
   if (index < 0 || index >= displayedPosts.length) return;
-  
+
   const modal = document.getElementById('modal');
   const mediaContainer = document.getElementById('modal-media');
-  
+
   // Stop current videos
   if (currentModalIndex >= 0 && mediaContainer) {
     const currentVideos = mediaContainer.querySelectorAll('video');
@@ -713,11 +698,11 @@ function openModal(index, carouselIdx = 0) {
       video.src = '';
     });
   }
-  
+
   currentModalIndex = index;
   currentCarouselIndex = carouselIdx;
   const post = displayedPosts[index];
-  
+
   if (!post) return;
 
   const titleEl = document.getElementById('modal-title');
@@ -740,7 +725,7 @@ function openModal(index, carouselIdx = 0) {
   titleEl.textContent = post.username ? `@${post.username}` : 'Post';
   captionEl.textContent = post.title || '';
   usernameEl.textContent = `@${post.username || 'unknown'}`;
-  
+
   linkEl.style.display = post.link ? '' : 'none';
   linkEl.href = post.link || '#';
 
@@ -763,22 +748,22 @@ function openModal(index, carouselIdx = 0) {
 function renderCarouselModal(post, container, startIndex = 0) {
   const items = post.carouselMedia;
   currentCarouselIndex = Math.min(startIndex, items.length - 1);
-  
+
   // Create carousel wrapper
   const carouselWrapper = document.createElement('div');
   carouselWrapper.className = 'carousel-wrapper';
-  
+
   // Create slides container
   const slidesContainer = document.createElement('div');
   slidesContainer.className = 'carousel-slides';
   slidesContainer.id = 'carousel-slides';
-  
+
   // Create slides for each item
   items.forEach((item, idx) => {
     const slide = document.createElement('div');
     slide.className = `carousel-slide ${idx === currentCarouselIndex ? 'active' : ''}`;
     slide.dataset.index = idx;
-    
+
     if (item.isVideo) {
       slide.innerHTML = `
         <div class="loading-video">
@@ -791,41 +776,41 @@ function renderCarouselModal(post, container, startIndex = 0) {
       // Show loading placeholder first
       slide.innerHTML = '<div class="loading-video"><div class="spinner"></div></div>';
     }
-    
+
     slidesContainer.appendChild(slide);
   });
-  
+
   carouselWrapper.appendChild(slidesContainer);
-  
+
   // Create navigation arrows
   if (items.length > 1) {
     const prevBtn = document.createElement('button');
     prevBtn.className = 'carousel-nav carousel-prev';
     prevBtn.innerHTML = '‹';
     prevBtn.onclick = () => navigateCarousel(-1, post);
-    
+
     const nextBtn = document.createElement('button');
     nextBtn.className = 'carousel-nav carousel-next';
     nextBtn.innerHTML = '›';
     nextBtn.onclick = () => navigateCarousel(1, post);
-    
+
     carouselWrapper.appendChild(prevBtn);
     carouselWrapper.appendChild(nextBtn);
-    
+
     // Create dots indicator
     const dotsContainer = document.createElement('div');
     dotsContainer.className = 'carousel-dots';
     dotsContainer.id = 'carousel-dots';
-    
+
     items.forEach((_, idx) => {
       const dot = document.createElement('span');
       dot.className = `carousel-dot ${idx === currentCarouselIndex ? 'active' : ''}`;
       dot.onclick = () => goToCarouselSlide(idx, post);
       dotsContainer.appendChild(dot);
     });
-    
+
     carouselWrapper.appendChild(dotsContainer);
-    
+
     // Counter
     const counter = document.createElement('div');
     counter.className = 'carousel-counter';
@@ -833,9 +818,9 @@ function renderCarouselModal(post, container, startIndex = 0) {
     counter.textContent = `${currentCarouselIndex + 1} / ${items.length}`;
     carouselWrapper.appendChild(counter);
   }
-  
+
   container.appendChild(carouselWrapper);
-  
+
   // Load the current slide content
   loadCarouselSlide(currentCarouselIndex, post);
 }
@@ -846,12 +831,12 @@ function loadCarouselSlide(idx, post) {
   const item = items[idx];
   const slides = document.querySelectorAll('.carousel-slide');
   const slide = slides[idx];
-  
+
   if (!slide || !item) return;
-  
+
   // Check if already loaded
   if (slide.dataset.loaded === 'true') return;
-  
+
   if (item.isVideo) {
     // Fetch video from Instagram
     chrome.runtime.sendMessage({
@@ -866,7 +851,7 @@ function loadCarouselSlide(idx, post) {
         video.controls = true;
         video.className = 'modal-video';
         video.crossOrigin = 'anonymous';
-        
+
         video.addEventListener('loadedmetadata', () => {
           const aspectRatio = video.videoWidth / video.videoHeight;
           video.classList.remove('portrait', 'square', 'landscape');
@@ -874,11 +859,11 @@ function loadCarouselSlide(idx, post) {
           else if (aspectRatio >= 0.7 && aspectRatio <= 1.3) video.classList.add('square');
           else video.classList.add('landscape');
         });
-        
+
         slide.innerHTML = '';
         slide.appendChild(video);
         slide.dataset.loaded = 'true';
-        
+
         // Auto-play if this is the current slide
         if (idx === currentCarouselIndex) {
           video.play().catch(() => {});
@@ -892,7 +877,7 @@ function loadCarouselSlide(idx, post) {
           img.alt = 'Video thumbnail';
           slide.innerHTML = '';
           slide.appendChild(img);
-          
+
           const playOverlay = document.createElement('div');
           playOverlay.className = 'video-play-overlay';
           playOverlay.innerHTML = '<span>▶</span> Video unavailable';
@@ -931,7 +916,7 @@ function loadCarouselSlide(idx, post) {
 function navigateCarousel(direction, post) {
   const items = post.carouselMedia;
   const newIndex = currentCarouselIndex + direction;
-  
+
   if (newIndex >= 0 && newIndex < items.length) {
     goToCarouselSlide(newIndex, post);
   }
@@ -941,7 +926,7 @@ function navigateCarousel(direction, post) {
 function goToCarouselSlide(idx, post) {
   const items = post.carouselMedia;
   if (idx < 0 || idx >= items.length) return;
-  
+
   // Pause current video if any
   const currentSlide = document.querySelector('.carousel-slide.active');
   if (currentSlide) {
@@ -950,30 +935,30 @@ function goToCarouselSlide(idx, post) {
       video.pause();
     }
   }
-  
+
   currentCarouselIndex = idx;
-  
+
   // Update slide visibility
   const slides = document.querySelectorAll('.carousel-slide');
   slides.forEach((slide, i) => {
     slide.classList.toggle('active', i === idx);
   });
-  
+
   // Update dots
   const dots = document.querySelectorAll('.carousel-dot');
   dots.forEach((dot, i) => {
     dot.classList.toggle('active', i === idx);
   });
-  
+
   // Update counter
   const counter = document.getElementById('carousel-counter');
   if (counter) {
     counter.textContent = `${idx + 1} / ${items.length}`;
   }
-  
+
   // Load the new slide content if not already loaded
   loadCarouselSlide(idx, post);
-  
+
   // Play video if the new slide has one
   const newSlide = slides[idx];
   if (newSlide) {
@@ -992,22 +977,22 @@ function renderVideoModal(post, container) {
       <p>Loading video...</p>
     </div>
   `;
-  
+
   if (!post.link) {
-    container.innerHTML = `<p class="error-message">Post has no link</p>`;
+    container.innerHTML = '<p class="error-message">Post has no link</p>';
     return;
   }
-  
+
   chrome.runtime.sendMessage({
     action: 'FETCH_VIDEO_CDN',
     permalink: post.link,
     postId: post.id
   }, (response) => {
     if (chrome.runtime.lastError) {
-      container.innerHTML = `<p class="error-message">Failed to load video</p>`;
+      container.innerHTML = '<p class="error-message">Failed to load video</p>';
       return;
     }
-    
+
     if (response && response.success && response.videoUrl) {
       const video = createVideoElement(response.videoUrl, true);
       video.controls = true;
@@ -1015,11 +1000,11 @@ function renderVideoModal(post, container) {
       video.className = 'modal-video';
       container.innerHTML = '';
       container.appendChild(video);
-      
+
       video.addEventListener('loadedmetadata', () => {
         const aspectRatio = video.videoWidth / video.videoHeight;
         video.classList.remove('portrait', 'square', 'landscape');
-        
+
         if (aspectRatio < 0.7) {
           video.classList.add('portrait');
         } else if (aspectRatio >= 0.7 && aspectRatio <= 1.3) {
@@ -1028,7 +1013,7 @@ function renderVideoModal(post, container) {
           video.classList.add('landscape');
         }
       });
-      
+
       video.addEventListener('loadeddata', () => {
         video.play().catch(() => {});
       });
@@ -1041,7 +1026,7 @@ function renderVideoModal(post, container) {
 // Render single image in modal
 function renderImageModal(post, container) {
   const imgSrc = post.image || post.thumbnail;
-  
+
   if (imgSrc && typeof imgSrc === 'string') {
     const img = document.createElement('img');
     img.src = imgSrc;
@@ -1051,7 +1036,7 @@ function renderImageModal(post, container) {
       container.innerHTML = '<p class="error-message">Image failed to load</p>';
     };
     container.appendChild(img);
-    
+
     // Try to fetch full-resolution image from Instagram
     if (post.link) {
       chrome.runtime.sendMessage({
@@ -1076,7 +1061,7 @@ function renderImageModal(post, container) {
 // Close modal
 function closeModal() {
   const modal = document.getElementById('modal');
-  
+
   const mediaContainer = modal.querySelector('#modal-media');
   if (mediaContainer) {
     const videos = mediaContainer.querySelectorAll('video');
@@ -1086,7 +1071,7 @@ function closeModal() {
       video.src = '';
     });
   }
-  
+
   modal.classList.remove('active');
   document.body.style.overflow = '';
   currentModalIndex = -1;
@@ -1104,22 +1089,21 @@ function navigateModal(direction) {
 function updateStats() {
   const startIndex = (currentPage - 1) * postsPerPage;
   const endIndex = Math.min(startIndex + displayedPosts.length, totalPosts);
-  
-  document.getElementById('filtered-count').textContent = totalPosts > 0 
-    ? `Showing ${startIndex + 1}–${endIndex} of ${totalPosts}` 
+
+  document.getElementById('filtered-count').textContent = totalPosts > 0
+    ? `Showing ${startIndex + 1}–${endIndex} of ${totalPosts}`
     : 'No posts';
-  
+
   const totalPages = Math.ceil(totalPosts / postsPerPage);
-  document.getElementById('page-info').textContent = totalPages > 0 
-    ? `Page ${currentPage} of ${totalPages}` 
+  document.getElementById('page-info').textContent = totalPages > 0
+    ? `Page ${currentPage} of ${totalPages}`
     : '';
-  
+
   updateHashtagChips();
 }
 
 // Setup sync panel
 function setupSyncPanel() {
-  const panel = document.getElementById('sync-panel');
   const overlay = document.getElementById('sync-panel-overlay');
   const closeBtn = document.getElementById('sync-panel-close');
   const startBtn = document.getElementById('sync-start-btn');
@@ -1159,7 +1143,7 @@ function openSyncPanel() {
   if (panel) panel.classList.add('active');
   if (overlay) overlay.classList.add('active');
   document.body.style.overflow = 'hidden';
-  
+
   // If currently syncing, restore the syncing UI state
   if (isSyncing) {
     restoreSyncingState();
@@ -1206,7 +1190,7 @@ function checkSyncProgress() {
     const resumeInfo = document.getElementById('sync-resume-info');
     const resumeDetails = document.getElementById('sync-resume-details');
     const startBtn = document.getElementById('sync-start-btn');
-    
+
     if (result.instagram_sync_progress) {
       const progress = result.instagram_sync_progress;
       if (resumeInfo) {
@@ -1267,7 +1251,6 @@ function clearAllData() {
       chrome.storage.local.remove(['instagram_sync_progress'], () => {
         // Reset UI state
         allPosts = [];
-        filteredPosts = [];
         displayedPosts = [];
         allHashtagsCache = []; // Clear hashtags cache
         totalPosts = 0;
@@ -1334,7 +1317,7 @@ function startSync() {
 
   // Start the sync - opens Instagram in background tab
   chrome.runtime.sendMessage({ action: 'SYNC_WITH_INSTAGRAM_BACKGROUND' });
-  
+
   // Sync runs in a background tab
   updateSyncStatus('syncing', 'Syncing...');
 }
@@ -1356,6 +1339,10 @@ function handleSyncStarted() {
 function updateSyncPanelProgress(synced, failed, total = 0) {
   document.getElementById('sync-synced-count').textContent = synced || 0;
   document.getElementById('sync-failed-count').textContent = failed || 0;
+  const totalElement = document.getElementById('sync-total-count');
+  if (totalElement) {
+    totalElement.textContent = total || 0;
+  }
 
   const progressBar = document.getElementById('sync-progress-bar');
   const processed = (synced || 0) + (failed || 0);
@@ -1388,13 +1375,12 @@ function handleSyncComplete(syncedCount, failedCount) {
   isSyncing = false;
   const startBtn = document.getElementById('sync-start-btn');
   const stopBtn = document.getElementById('sync-stop-btn');
-  const progressSection = document.getElementById('sync-progress-section');
   const completeSection = document.getElementById('sync-complete-section');
   const headerBtn = document.getElementById('sync-btn');
   const progressBar = document.getElementById('sync-progress-bar');
 
   if (progressBar) progressBar.style.width = '100%';
-  
+
   updateSyncPanelProgress(syncedCount, failedCount);
 
   if (startBtn) {
@@ -1448,8 +1434,8 @@ function handleSyncStopped(syncedCount, failedCount) {
     stopBtn.textContent = 'Stop Sync';
   }
   if (headerBtn) headerBtn.classList.remove('syncing');
-  
-  
+
+
   // Show resume info
   checkSyncProgress();
 
@@ -1475,10 +1461,10 @@ function handleSyncError(error) {
   }
   if (stopBtn) stopBtn.style.display = 'none';
   if (headerBtn) headerBtn.classList.remove('syncing');
-  
+
   // Show error in sync status
   updateSyncStatus('error', `Error: ${error}`);
-  
+
   // Clear error after 5 seconds
   setTimeout(() => {
     updateSyncStatus('', '');
@@ -1495,7 +1481,7 @@ function updateSyncStatus(status, message) {
     statusEl.textContent = message;
     statusEl.style.display = message ? 'block' : 'none';
   }
-  
+
   // Update status inside sync panel (visible when panel is open)
   const progressText = document.getElementById('sync-progress-text');
   if (progressText) {

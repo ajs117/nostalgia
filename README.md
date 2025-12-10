@@ -76,9 +76,38 @@ npm run build
 npm run package
 ```
 
+### Testing & Quality Gate
+
+```bash
+# Run quality gate (lint fix + build + tests)
+npm run quality-gate
+
+# Run tests only
+npm test
+
+# Run tests with coverage
+npm run test:coverage
+
+# Run tests in watch mode
+npm run test:watch
+
+# Run ESLint
+npm run lint
+
+# Run ESLint with auto-fix
+npm run lint:fix
+```
+
+The quality gate script will:
+1. ✅ Run ESLint with auto-fix
+2. ✅ Build the extension
+3. ✅ Run unit tests with coverage
+
+All steps must pass for the quality gate to succeed.
+
 ## Version
 
-**Current Version**: 1.0
+**Current Version**: 1.3
 
 ## License
 

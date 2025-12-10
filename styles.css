@@ -1378,8 +1378,30 @@ select:hover {
 .sync-description {
   color: var(--text-secondary);
   font-size: 14px;
-  margin: 0 0 20px 0;
+  margin: 0 0 16px 0;
   line-height: 1.5;
+}
+
+.sync-login-notice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  background: rgba(255, 165, 0, 0.1);
+  border: 1px solid rgba(255, 165, 0, 0.3);
+  border-radius: var(--radius-md);
+  margin-bottom: 20px;
+  font-size: 13px;
+}
+
+.sync-login-notice .notice-icon {
+  font-size: 18px;
+  flex-shrink: 0;
+}
+
+.sync-login-notice .notice-text {
+  line-height: 1.5;
+  color: var(--text-primary);
 }
 
 .sync-resume-info {
@@ -1542,7 +1564,7 @@ select:hover {
 
 .sync-stats {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr 1fr 1fr;
   gap: 12px;
 }
 
@@ -1550,6 +1572,11 @@ select:hover {
   padding: 16px;
   border-radius: var(--radius-md);
   text-align: center;
+}
+
+.sync-stat.total {
+  background: rgba(79, 91, 213, 0.1);
+  border: 1px solid rgba(79, 91, 213, 0.2);
 }
 
 .sync-stat.synced {
@@ -1567,6 +1594,10 @@ select:hover {
   font-size: 28px;
   font-weight: 700;
   margin-bottom: 4px;
+}
+
+.sync-stat.total .stat-number {
+  color: var(--accent-blue);
 }
 
 .sync-stat.synced .stat-number {

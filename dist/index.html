@@ -38,7 +38,12 @@
       <button id="sync-panel-close" class="sync-panel-close">&times;</button>
     </div>
     <div class="sync-panel-content">
-      <p class="sync-description">Import your Instagram saved posts. Opens Instagram in a background tab - keep it open while syncing!</p>
+      <p class="sync-description">Import your Instagram saved posts. Opens Instagram in a background tab.</p>
+      
+      <div class="sync-login-notice">
+        <span class="notice-icon">⚠️</span>
+        <span class="notice-text">Please make sure you are logged into Instagram before starting the sync. Keep the Instagram tab open while syncing!</span>
+      </div>
       
       <div id="sync-resume-info" class="sync-resume-info" style="display: none;">
         <span class="resume-icon">⏸️</span>
@@ -69,6 +74,10 @@
       </div>
 
       <div class="sync-stats">
+        <div class="sync-stat total">
+          <span id="sync-total-count" class="stat-number">0</span>
+          <span class="stat-label">Total</span>
+        </div>
         <div class="sync-stat synced">
           <span id="sync-synced-count" class="stat-number">0</span>
           <span class="stat-label">Synced</span>

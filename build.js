@@ -29,7 +29,7 @@ async function minifyJS(code, filename) {
           unsafe_methods: false,
           unsafe_proto: false,
           unsafe_regexp: false,
-          unsafe_undefined: false,
+          unsafe_undefined: false
         },
         mangle: {
           reserved: ['chrome', 'indexedDB', 'FileReader', 'Blob', 'URL', 'fetch']
@@ -58,7 +58,7 @@ function basicMinifyJS(code) {
     .replace(/\/\*[\s\S]*?\*\//g, '') // Remove block comments
     .replace(/\/\/.*$/gm, '') // Remove line comments
     .replace(/\s+/g, ' ') // Collapse whitespace
-    .replace(/\s*([{}();,=+\-*\/])\s*/g, '$1') // Remove spaces around operators
+    .replace(/\s*([{}();,=+\-*/])\s*/g, '$1') // Remove spaces around operators
     .replace(/;\s*}/g, '}') // Remove semicolons before closing braces
     .trim();
 }
@@ -82,73 +82,73 @@ function copyFile(src, dest) {
 
 async function build() {
   const distDir = path.join(__dirname, 'dist');
-  
+
   // Clean dist directory
   if (fs.existsSync(distDir)) {
     fs.rmSync(distDir, { recursive: true, force: true });
   }
   fs.mkdirSync(distDir, { recursive: true });
-  
+
   console.log('Building nostalgia extension...');
   console.log(terser ? '✓ Using Terser for advanced minification' : '⚠ Using basic minifier (install terser for better results)');
   console.log('');
-  
+
   // Copy and minify JS files
   const jsFiles = ['background.js', 'contentScript.js', 'app.js'];
   const originalSizes = {};
   const minifiedSizes = {};
-  
+
   for (const file of jsFiles) {
     const src = path.join(__dirname, file);
     if (fs.existsSync(src)) {
       const content = fs.readFileSync(src, 'utf8');
       const originalSize = Buffer.byteLength(content, 'utf8');
       originalSizes[file] = originalSize;
-      
+
       const minified = await minifyJS(content, file);
       const minifiedSize = Buffer.byteLength(minified, 'utf8');
       minifiedSizes[file] = minifiedSize;
-      
+
       fs.writeFileSync(path.join(distDir, file), minified);
       const savings = ((1 - minifiedSize / originalSize) * 100).toFixed(1);
       console.log(`✓ Minified ${file}: ${(originalSize / 1024).toFixed(1)}KB → ${(minifiedSize / 1024).toFixed(1)}KB (${savings}% reduction)`);
     }
   }
-  
+
   const totalOriginal = Object.values(originalSizes).reduce((a, b) => a + b, 0);
   const totalMinified = Object.values(minifiedSizes).reduce((a, b) => a + b, 0);
   const totalSavings = ((1 - totalMinified / totalOriginal) * 100).toFixed(1);
   console.log(`\n📦 Total JS: ${(totalOriginal / 1024).toFixed(1)}KB → ${(totalMinified / 1024).toFixed(1)}KB (${totalSavings}% reduction)`);
   console.log('');
-  
+
   // Copy and minify CSS files
   const cssFiles = ['styles.css'];
   const cssOriginalSizes = {};
   const cssMinifiedSizes = {};
-  
+
   for (const file of cssFiles) {
     const src = path.join(__dirname, file);
     if (fs.existsSync(src)) {
       const content = fs.readFileSync(src, 'utf8');
       const originalSize = Buffer.byteLength(content, 'utf8');
       cssOriginalSizes[file] = originalSize;
-      
+
       const minified = minifyCSS(content);
       const minifiedSize = Buffer.byteLength(minified, 'utf8');
       cssMinifiedSizes[file] = minifiedSize;
-      
+
       fs.writeFileSync(path.join(distDir, file), minified);
       const savings = ((1 - minifiedSize / originalSize) * 100).toFixed(1);
       console.log(`✓ Minified ${file}: ${(originalSize / 1024).toFixed(1)}KB → ${(minifiedSize / 1024).toFixed(1)}KB (${savings}% reduction)`);
     }
   }
-  
+
   const cssTotalOriginal = Object.values(cssOriginalSizes).reduce((a, b) => a + b, 0);
   const cssTotalMinified = Object.values(cssMinifiedSizes).reduce((a, b) => a + b, 0);
   const cssTotalSavings = ((1 - cssTotalMinified / cssTotalOriginal) * 100).toFixed(1);
   console.log(`📦 Total CSS: ${(cssTotalOriginal / 1024).toFixed(1)}KB → ${(cssTotalMinified / 1024).toFixed(1)}KB (${cssTotalSavings}% reduction)`);
   console.log('');
-  
+
   // Copy HTML files (no minification needed)
   const htmlFiles = ['index.html'];
   htmlFiles.forEach(file => {
@@ -158,17 +158,17 @@ async function build() {
       console.log(`✓ Copied ${file}`);
     }
   });
-  
+
   // Copy manifest
   copyFile(path.join(__dirname, 'manifest.json'), path.join(distDir, 'manifest.json'));
   console.log('✓ Copied manifest.json');
-  
+
   // Convert SVG to PNG icons if sharp is available, otherwise copy existing PNGs
   const svgPath = path.join(__dirname, 'logo.svg');
   if (fs.existsSync(svgPath) && sharp) {
     console.log('Converting SVG to PNG icons...');
     const svgBuffer = fs.readFileSync(svgPath);
-    
+
     // Generate different sizes
     const sizes = [
       { size: 16, name: 'logo16.png' },
@@ -177,7 +177,7 @@ async function build() {
       { size: 192, name: 'logo192.png' },
       { size: 512, name: 'logo512.png' }
     ];
-    
+
     Promise.all(sizes.map(({ size, name }) => {
       return sharp(svgBuffer)
         .resize(size, size)
