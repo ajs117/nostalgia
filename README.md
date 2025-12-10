@@ -1,6 +1,6 @@
-# Nostalgia
+# nostalgia
 
-**Nostalgia** - Your Instagram saved posts viewer
+**nostalgia** - Your Instagram saved posts viewer
 
 A Chrome extension that lets you sync, view, and organize your Instagram saved posts with a beautiful Instagram-inspired interface.
 

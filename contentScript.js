@@ -627,6 +627,77 @@ async function fetchCollections() {
   return allCollections;
 }
 
+// Get total saved posts count - try user info endpoint first, then estimate from collections
+async function fetchTotalSavedCount() {
+  try {
+    // Try to get from the saved feed count endpoint
+    const countUrl = `https://i.instagram.com/api/v1/feed/saved/all/count/`;
+    
+    try {
+      const countResponse = await fetch(countUrl, {
+        method: "GET",
+        ...defaultRequest,
+        redirect: "error",
+      });
+      
+      if (countResponse.status === 200) {
+        const countData = await countResponse.json();
+        if (countData.count) {
+          return countData.count;
+        }
+      }
+    } catch (e) {
+      // Endpoint might not exist, continue to fallback
+    }
+    
+    // Fallback: estimate from collections
+    const url = `https://i.instagram.com/api/v1/collections/list/?collection_types=["ALL_MEDIA_AUTO_COLLECTION","MEDIA"]&include_public_only=0`;
+    
+    const response = await fetch(url, {
+      method: "GET",
+      ...defaultRequest,
+      redirect: "error",
+    });
+
+    if (response.status !== 200) {
+      return 0;
+    }
+
+    const data = await response.json();
+    
+    if (data.items && data.items.length > 0) {
+      // Look for ALL_MEDIA_AUTO_COLLECTION first (the "All Posts" collection)
+      const allPostsCollection = data.items.find(
+        item => item.collection_type === "ALL_MEDIA_AUTO_COLLECTION" || 
+                item.collection_name === "All Posts"
+      );
+      
+      if (allPostsCollection) {
+        const count = allPostsCollection.collection_media_count || allPostsCollection.media_count;
+        if (count) return count;
+      }
+      
+      // Fallback: find the largest collection_media_count as a rough estimate
+      // (posts might not be in collections, so this is just a minimum estimate)
+      let maxCount = 0;
+      for (const item of data.items) {
+        const count = item.collection_media_count || item.media_count || 0;
+        if (count > maxCount) {
+          maxCount = count;
+        }
+      }
+      
+      // Return 0 if we can't get a reliable count - progress bar will use fallback mode
+      return 0;
+    }
+    
+    return 0;
+  } catch (error) {
+    console.error(`Error fetching total saved count: ${error.message}`);
+    return 0;
+  }
+}
+
 function getSavedTimestamp(post) {
   let savedTimestamp = post.saved_at || post.savedAt || post.saved_timestamp;
   
@@ -708,14 +779,14 @@ async function processPost(post) {
   return createPostElement(post, postId, url, thumbnailBase64, carouselMedia);
 }
 
-async function saveBatchIfFull(batchBuffer, syncedCount, failedCount, currentMinId, savedMinId, savedMaxId, maxId) {
+async function saveBatchIfFull(batchBuffer, syncedCount, failedCount, currentMinId, savedMinId, savedMaxId, maxId, total = 0) {
   if (batchBuffer.length >= BATCH_SIZE) {
     const result = await saveBatch(batchBuffer);
     const addedCount = result?.added || batchBuffer.length;
     syncedCount += addedCount;
     batchBuffer.length = 0;
     await saveProgress(currentMinId || savedMinId || "", maxId || savedMaxId || "", syncedCount, failedCount);
-    updateSyncProgress(syncedCount, failedCount);
+    updateSyncProgress(syncedCount, failedCount, total);
     return syncedCount;
   }
   return syncedCount;
@@ -808,6 +879,10 @@ async function getInstagramSavedPosts() {
       failedCount = 0;
     }
 
+    // Fetch total saved posts count from Instagram API
+    totalSavedCount = await fetchTotalSavedCount();
+    console.log(`Total saved posts from Instagram: ${totalSavedCount}`);
+
     // Show progress bar
     const progressBarContainer = document.getElementById("progress-bar-container");
     if (progressBarContainer) {
@@ -830,9 +905,8 @@ async function getInstagramSavedPosts() {
     const maxRetries = 3;
     let batchBuffer = [];
     let checkingNewPosts = !!savedMinId;
-    let totalPostsFound = 0;
     
-    updateSyncProgress(syncedCount, failedCount);
+    updateSyncProgress(syncedCount, failedCount, totalSavedCount);
     maxId = "";
 
     while (moreAvailable && isSyncing) {
@@ -875,11 +949,11 @@ async function getInstagramSavedPosts() {
                 existingPostIds.add(element.id);
                 existingPostLinks.add(element.url);
                 
-                syncedCount = await saveBatchIfFull(batchBuffer, syncedCount, failedCount, currentMinId, savedMinId, savedMaxId, maxId);
+                syncedCount = await saveBatchIfFull(batchBuffer, syncedCount, failedCount, currentMinId, savedMinId, savedMaxId, maxId, totalSavedCount);
               } catch (postError) {
                 console.error(`Error processing post ${post.code}:`, postError);
                 failedCount++;
-                updateSyncProgress(syncedCount, failedCount);
+                updateSyncProgress(syncedCount, failedCount, totalSavedCount);
               }
             }
             
@@ -906,11 +980,11 @@ async function getInstagramSavedPosts() {
               existingPostIds.add(element.id);
               existingPostLinks.add(element.url);
               
-              syncedCount = await saveBatchIfFull(batchBuffer, syncedCount, failedCount, currentMinId, savedMinId, savedMaxId, maxId);
+              syncedCount = await saveBatchIfFull(batchBuffer, syncedCount, failedCount, currentMinId, savedMinId, savedMaxId, maxId, totalSavedCount);
             } catch (postError) {
               console.error(`Error processing post ${post.code}:`, postError);
               failedCount++;
-              updateSyncProgress(syncedCount, failedCount);
+              updateSyncProgress(syncedCount, failedCount, totalSavedCount);
             }
           }
         }
@@ -935,7 +1009,7 @@ async function getInstagramSavedPosts() {
       await saveBatch(batchBuffer);
       syncedCount += batchBuffer.length;
       await saveProgress(currentMinId || savedMinId || "", maxId || savedMaxId || "", syncedCount, failedCount);
-      updateSyncProgress(syncedCount, failedCount);
+      updateSyncProgress(syncedCount, failedCount, totalSavedCount);
     }
 
     await clearProgress();
@@ -984,16 +1058,40 @@ async function clearProgress() {
   });
 }
 
-function updateSyncProgress(synced, failed) {
+function updateSyncProgress(synced, failed, total = 0) {
+  // Send progress update to background script for forwarding to extension page
+  chrome.runtime.sendMessage({
+    action: "SYNC_PROGRESS_UPDATE",
+    synced: synced,
+    failed: failed,
+    total: total,
+  });
+  
   const drawer = document.getElementById("instagram-sync-drawer");
   if (!drawer) return;
   
   const progressElement = drawer.querySelector("#sync-progress");
   if (progressElement) {
-    progressElement.innerHTML = `
-      <span class="pulse-dot" style="width: 8px; height: 8px; background: #2ed573; border-radius: 50%; animation: pulse 1.5s infinite;"></span>
-      <span>Syncing posts...</span>
-    `;
+    const processed = synced + failed;
+    if (total > 0) {
+      const percent = Math.min(100, Math.round((processed / total) * 100));
+      progressElement.innerHTML = `
+        <span class="pulse-dot" style="width: 8px; height: 8px; background: #2ed573; border-radius: 50%; animation: pulse 1.5s infinite;"></span>
+        <span style="opacity: 0.6; margin-left: auto;">${processed} / ${total}</span>
+      `;
+    } else {
+      progressElement.innerHTML = `
+        <span class="pulse-dot" style="width: 8px; height: 8px; background: #2ed573; border-radius: 50%; animation: pulse 1.5s infinite;"></span>
+      `;
+    }
+  }
+  
+  // Update progress bar
+  const progressBar = document.getElementById("progress-bar");
+  if (progressBar && total > 0) {
+    const processed = synced + failed;
+    const percent = Math.min(100, Math.round((processed / total) * 100));
+    progressBar.style.width = `${percent}%`;
   }
   
   // Add pulse animation if not exists
@@ -1019,6 +1117,32 @@ chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
       drawer = createSyncDrawer();
     }
     setTimeout(() => showDrawer(drawer), 500);
+  } else if (request.action === "START_BACKGROUND_SYNC") {
+    // Background sync - no drawer, just start syncing immediately
+    try {
+      const result = await getInstagramSavedPosts();
+      
+      if (isSyncing) {
+        chrome.runtime.sendMessage({
+          action: "SYNC_FINISHED",
+          syncedCount: result.syncedCount,
+          failedCount: result.failedCount,
+        });
+      } else {
+        // Sync was stopped
+        chrome.runtime.sendMessage({
+          action: "SYNC_STOPPED",
+          syncedCount: result.syncedCount,
+          failedCount: result.failedCount,
+        });
+      }
+    } catch (error) {
+      console.error(`Error during background sync: ${error.message}`);
+      chrome.runtime.sendMessage({
+        action: "IMPORT_FAILED",
+        error: error.message,
+      });
+    }
   } else if (request.action === "SYNC_COMPLETE") {
     updateSyncDrawer(request.syncedCount, request.failedCount, false);
   } else if (request.action === "IMPORT_INSTAGRAM_POSTS") {
@@ -1069,6 +1193,13 @@ chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
         progressElement.innerHTML = `<span style="color: #fcb045;">Stopping...</span> <span style="opacity: 0.6;">(${syncedCount} synced, ${failedCount} failed)</span>`;
       }
     }
+    
+    // Send stopped notification
+    chrome.runtime.sendMessage({
+      action: "SYNC_STOPPED",
+      syncedCount: syncedCount,
+      failedCount: failedCount,
+    });
   }
 });
 

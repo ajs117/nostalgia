@@ -1,4 +1,4 @@
-# Nostalgia v1.0 - Shipping Checklist
+# nostalgia v1.0 - Shipping Checklist
 
 ## ✅ Code Review Complete
 

@@ -3,8 +3,8 @@ let allPosts = [];
 let filteredPosts = [];
 let displayedPosts = [];
 let currentPage = 1;
-let postsPerPage = 21; // 21 per page
-let currentSort = 'newest';
+let postsPerPage = 20; // Will be adjusted for complete rows
+let currentSort = 'newest-saved';
 let currentTypeFilter = 'all';
 let currentHashtagFilter = null;
 let currentSearchQuery = '';
@@ -14,6 +14,8 @@ let currentCarouselIndex = 0; // Track which item in a carousel is being viewed
 let isLoading = false;
 let totalPosts = 0;
 let hasMorePosts = true;
+let isSyncing = false;
+let syncTabId = null;
 
 // Debounce helper
 function debounce(func, wait) {
@@ -79,12 +81,48 @@ function createPlaceholder(container, message, isError = false) {
   container.appendChild(placeholder);
 }
 
+// Get number of grid columns based on screen width
+function getGridColumns() {
+  const width = window.innerWidth;
+  if (width <= 480) return 2;
+  if (width <= 768) return 2;
+  if (width <= 1024) return 3;
+  if (width <= 1200) return 4;
+  return 5;
+}
+
+// Calculate posts per page for complete rows
+function calculatePostsPerPage() {
+  const cols = getGridColumns();
+  const rows = 4; // Show 4 complete rows
+  return cols * rows;
+}
+
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
+  postsPerPage = calculatePostsPerPage();
   initializeEventListeners();
-  loadPosts();
+  loadPosts(false, true); // Load posts and fetch hashtags after posts load successfully
   setupMessageListener();
   setupMobileFilters();
+  setupSyncPanel();
+  
+  // Clear any stale sync status on fresh page load
+  // The status will be updated if there's an active sync via messages
+  updateSyncStatus('', '');
+  
+  // Recalculate on resize
+  let resizeTimeout;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimeout);
+    resizeTimeout = setTimeout(() => {
+      const newPostsPerPage = calculatePostsPerPage();
+      if (newPostsPerPage !== postsPerPage) {
+        postsPerPage = newPostsPerPage;
+        loadPosts();
+      }
+    }, 250);
+  });
 });
 
 // Event listeners
@@ -113,9 +151,9 @@ function initializeEventListeners() {
   if (sortSelectMobile) sortSelectMobile.addEventListener('change', handleSortChangeMobile);
   if (typeFilterMobile) typeFilterMobile.addEventListener('change', handleTypeFilterChangeMobile);
   
-  // Sync button
+  // Sync button - now opens sync panel
   const syncBtn = document.getElementById('sync-btn');
-  if (syncBtn) syncBtn.addEventListener('click', handleSync);
+  if (syncBtn) syncBtn.addEventListener('click', openSyncPanel);
   
   // Modal
   document.getElementById('modal-close').addEventListener('click', closeModal);
@@ -161,7 +199,7 @@ function setupMobileFilters() {
 }
 
 // Load posts with pagination from background
-function loadPosts(append = false) {
+function loadPosts(append = false, fetchHashtagsAfter = false) {
   if (isLoading) return;
   
   isLoading = true;
@@ -173,7 +211,8 @@ function loadPosts(append = false) {
     limit: postsPerPage,
     sortBy: currentSort,
     filterType: currentTypeFilter,
-    searchQuery: currentSearchQuery
+    searchQuery: currentSearchQuery,
+    hashtagFilter: currentHashtagFilter
   }, (response) => {
     isLoading = false;
     hideLoadingState();
@@ -193,17 +232,32 @@ function loadPosts(append = false) {
       totalPosts = response.total || 0;
       hasMorePosts = response.hasMore || false;
       
-      filteredPosts = allPosts;
-      displayedPosts = allPosts;
-      
-      updateStats();
-      renderPosts();
+      // Apply local filters (like hashtag) after loading
+      applyLocalFilters();
       renderPagination();
+      
+      // Show hashtags from current page immediately (fallback)
+      if (allHashtagsCache.length === 0 && allPosts.length > 0) {
+        updateHashtagsFromCurrentPosts();
+      }
+      
+      // Fetch hashtags after posts are loaded (service worker is ready)
+      if (fetchHashtagsAfter) {
+        fetchAllHashtags();
+      } else if (allHashtagsCache.length === 0) {
+        // If hashtags cache is empty, try to fetch from database
+        fetchAllHashtags();
+      }
     } else {
       showError('No posts found. Click "Sync Posts" to import your Instagram saved posts.');
       allPosts = [];
       totalPosts = 0;
       renderPosts();
+      
+      // Still try to fetch hashtags even if no posts on this page
+      if (fetchHashtagsAfter) {
+        fetchAllHashtags();
+      }
     }
   });
 }
@@ -240,27 +294,20 @@ function setupMessageListener() {
     if (request.action === 'UPDATE_ITEMS') {
       // Don't reset page during sync - preserve user's current page position
       loadPosts();
+      fetchAllHashtags(); // Refresh hashtags when posts are updated
     } else if (request.action === 'SYNC_STARTED') {
-      updateSyncStatus('syncing', 'Syncing posts...');
-      const syncBtn = document.getElementById('sync-btn');
-      if (syncBtn) syncBtn.style.display = 'none';
+      handleSyncStarted();
+    } else if (request.action === 'SYNC_PROGRESS') {
+      updateSyncPanelProgress(request.synced, request.failed, request.total);
     } else if (request.action === 'SYNC_COMPLETE') {
-      updateSyncStatus('success', `Sync complete! ${request.syncedCount} posts synced`);
-      // Only reset to page 1 when sync is fully complete, not during
+      handleSyncComplete(request.syncedCount, request.failedCount);
       currentPage = 1;
       loadPosts();
-      setTimeout(() => {
-        updateSyncStatus('', '');
-        const syncBtn = document.getElementById('sync-btn');
-        if (syncBtn) syncBtn.style.display = '';
-      }, 3000);
+      fetchAllHashtags(); // Refresh hashtags after sync
     } else if (request.action === 'IMPORT_FAILED') {
-      updateSyncStatus('error', 'Sync failed. Please try again.');
-      setTimeout(() => {
-        updateSyncStatus('', '');
-        const syncBtn = document.getElementById('sync-btn');
-        if (syncBtn) syncBtn.style.display = '';
-      }, 3000);
+      handleSyncError(request.error || 'Sync failed. Please try again.');
+    } else if (request.action === 'SYNC_STOPPED') {
+      handleSyncStopped(request.syncedCount, request.failedCount);
     }
     return true;
   });
@@ -337,24 +384,15 @@ function handleHashtagClick(hashtag) {
     currentHashtagFilter = hashtag;
   }
   currentPage = 1;
-  applyLocalFilters();
-  updateHashtagChips();
+  loadPosts(); // Reload with new hashtag filter
 }
 
-// Apply local filters (hashtag only - search/sort/type done server-side)
+// Apply local filters (all filtering now done server-side in background.js)
 function applyLocalFilters() {
-  let filtered = allPosts;
-  
-  if (currentHashtagFilter) {
-    filtered = filtered.filter(post => {
-      const caption = post.title || '';
-      const hashtags = extractHashtags(caption);
-      return hashtags.includes(currentHashtagFilter);
-    });
-  }
-
-  filteredPosts = filtered;
-  displayedPosts = filtered;
+  // All filtering (type, search, hashtag) is now done at the database level
+  // This function just sets up the display arrays
+  filteredPosts = allPosts;
+  displayedPosts = allPosts;
   renderPosts();
   updateStats();
 }
@@ -366,8 +404,34 @@ function extractHashtags(text) {
   return matches ? matches.map(tag => tag.toLowerCase()) : [];
 }
 
-// Get hashtags with counts
-function getHashtagsWithCounts() {
+// Cache for all hashtags from database
+let allHashtagsCache = [];
+
+// Fetch all hashtags from database
+function fetchAllHashtags() {
+  chrome.runtime.sendMessage({ action: 'GET_ALL_HASHTAGS' }, (response) => {
+    if (chrome.runtime.lastError) {
+      console.error('Error fetching hashtags:', chrome.runtime.lastError);
+      // Fallback: use hashtags from current page posts
+      updateHashtagsFromCurrentPosts();
+      return;
+    }
+    
+    if (response && response.success && Array.isArray(response.hashtags)) {
+      allHashtagsCache = response.hashtags;
+      updateHashtagChips();
+    } else if (response && Array.isArray(response.hashtags)) {
+      allHashtagsCache = response.hashtags;
+      updateHashtagChips();
+    } else {
+      // Fallback: use hashtags from current page posts
+      updateHashtagsFromCurrentPosts();
+    }
+  });
+}
+
+// Fallback: extract hashtags from currently loaded posts
+function updateHashtagsFromCurrentPosts() {
   const hashtagCounts = new Map();
   allPosts.forEach(post => {
     const caption = post.title || '';
@@ -375,9 +439,15 @@ function getHashtagsWithCounts() {
       hashtagCounts.set(tag, (hashtagCounts.get(tag) || 0) + 1);
     });
   });
-  return Array.from(hashtagCounts.entries())
+  allHashtagsCache = Array.from(hashtagCounts.entries())
     .map(([tag, count]) => ({ tag, count }))
     .sort((a, b) => b.count - a.count);
+  updateHashtagChips();
+}
+
+// Get hashtags with counts (uses cached data from database)
+function getHashtagsWithCounts() {
+  return allHashtagsCache;
 }
 
 // Update hashtag chips (both desktop and mobile)
@@ -1047,21 +1117,391 @@ function updateStats() {
   updateHashtagChips();
 }
 
-// Handle sync
-function handleSync() {
-  chrome.runtime.sendMessage({ action: 'SYNC_WITH_INSTAGRAM' });
-  updateSyncStatus('syncing', 'Opening Instagram...');
-  
-  const syncBtn = document.getElementById('sync-btn');
-  if (syncBtn) syncBtn.style.display = 'none';
+// Setup sync panel
+function setupSyncPanel() {
+  const panel = document.getElementById('sync-panel');
+  const overlay = document.getElementById('sync-panel-overlay');
+  const closeBtn = document.getElementById('sync-panel-close');
+  const startBtn = document.getElementById('sync-start-btn');
+  const stopBtn = document.getElementById('sync-stop-btn');
+  const clearProgressBtn = document.getElementById('sync-clear-progress');
+
+  if (closeBtn) {
+    closeBtn.addEventListener('click', closeSyncPanel);
+  }
+  if (overlay) {
+    overlay.addEventListener('click', () => {
+      if (!isSyncing) closeSyncPanel();
+    });
+  }
+  if (startBtn) {
+    startBtn.addEventListener('click', startSync);
+  }
+  if (stopBtn) {
+    stopBtn.addEventListener('click', stopSync);
+  }
+  if (clearProgressBtn) {
+    clearProgressBtn.addEventListener('click', clearSyncProgress);
+  }
+
+  const clearAllDataBtn = document.getElementById('clear-all-data-btn');
+  if (clearAllDataBtn) {
+    clearAllDataBtn.addEventListener('click', clearAllData);
+  }
+
+  // Check for saved progress on load
+  checkSyncProgress();
 }
 
-// Update sync status
+function openSyncPanel() {
+  const panel = document.getElementById('sync-panel');
+  const overlay = document.getElementById('sync-panel-overlay');
+  if (panel) panel.classList.add('active');
+  if (overlay) overlay.classList.add('active');
+  document.body.style.overflow = 'hidden';
+  
+  // If currently syncing, restore the syncing UI state
+  if (isSyncing) {
+    restoreSyncingState();
+  } else {
+    checkSyncProgress();
+  }
+}
+
+function restoreSyncingState() {
+  const startBtn = document.getElementById('sync-start-btn');
+  const stopBtn = document.getElementById('sync-stop-btn');
+  const progressSection = document.getElementById('sync-progress-section');
+  const completeSection = document.getElementById('sync-complete-section');
+  const headerBtn = document.getElementById('sync-btn');
+  const resumeInfo = document.getElementById('sync-resume-info');
+
+  if (startBtn) {
+    startBtn.disabled = true;
+    startBtn.innerHTML = `
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18" class="spin">
+        <circle cx="12" cy="12" r="10"/>
+      </svg>
+      Syncing...
+    `;
+    startBtn.classList.add('syncing');
+  }
+  if (stopBtn) stopBtn.style.display = 'block';
+  if (progressSection) progressSection.style.display = 'block';
+  if (completeSection) completeSection.style.display = 'none';
+  if (headerBtn) headerBtn.classList.add('syncing');
+  if (resumeInfo) resumeInfo.style.display = 'none';
+}
+
+function closeSyncPanel() {
+  const panel = document.getElementById('sync-panel');
+  const overlay = document.getElementById('sync-panel-overlay');
+  if (panel) panel.classList.remove('active');
+  if (overlay) overlay.classList.remove('active');
+  document.body.style.overflow = '';
+}
+
+function checkSyncProgress() {
+  chrome.storage.local.get(['instagram_sync_progress'], (result) => {
+    const resumeInfo = document.getElementById('sync-resume-info');
+    const resumeDetails = document.getElementById('sync-resume-details');
+    const startBtn = document.getElementById('sync-start-btn');
+    
+    if (result.instagram_sync_progress) {
+      const progress = result.instagram_sync_progress;
+      if (resumeInfo) {
+        resumeInfo.style.display = 'flex';
+        resumeDetails.textContent = `${progress.synced} synced, ${progress.failed} failed`;
+      }
+      if (startBtn) {
+        startBtn.innerHTML = `
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+            <polygon points="5 3 19 12 5 21 5 3"/>
+          </svg>
+          Resume Sync
+        `;
+      }
+      // Update stats display
+      updateSyncPanelProgress(progress.synced, progress.failed);
+    } else {
+      if (resumeInfo) resumeInfo.style.display = 'none';
+      if (startBtn) {
+        startBtn.innerHTML = `
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+            <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0118.8-4.3M22 12.5a10 10 0 01-18.8 4.3"/>
+          </svg>
+          Start Sync
+        `;
+      }
+    }
+  });
+}
+
+function clearSyncProgress() {
+  chrome.storage.local.remove(['instagram_sync_progress'], () => {
+    checkSyncProgress();
+    document.getElementById('sync-synced-count').textContent = '0';
+    document.getElementById('sync-failed-count').textContent = '0';
+  });
+}
+
+function clearAllData() {
+  if (!confirm('Are you sure you want to delete ALL synced posts? This cannot be undone.')) {
+    return;
+  }
+
+  const btn = document.getElementById('clear-all-data-btn');
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = `
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" class="spin">
+        <circle cx="12" cy="12" r="10"/>
+      </svg>
+      Clearing...
+    `;
+  }
+
+  chrome.runtime.sendMessage({ action: 'CLEAR_ALL_POSTS' }, (response) => {
+    if (response && response.success) {
+      // Also clear sync progress
+      chrome.storage.local.remove(['instagram_sync_progress'], () => {
+        // Reset UI state
+        allPosts = [];
+        filteredPosts = [];
+        displayedPosts = [];
+        allHashtagsCache = []; // Clear hashtags cache
+        totalPosts = 0;
+        currentPage = 1;
+        currentHashtagFilter = null;
+
+        // Update UI
+        document.getElementById('sync-synced-count').textContent = '0';
+        document.getElementById('sync-failed-count').textContent = '0';
+        checkSyncProgress();
+        renderPosts();
+        updateStats();
+        renderPagination();
+        updateHashtagChips();
+
+
+        // Close panel
+        closeSyncPanel();
+      });
+    }
+
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = `
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+          <polyline points="3 6 5 6 21 6"/>
+          <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/>
+          <line x1="10" y1="11" x2="10" y2="17"/>
+          <line x1="14" y1="11" x2="14" y2="17"/>
+        </svg>
+        Clear All Data
+      `;
+    }
+
+    // Clear sync status
+    updateSyncStatus('', '');
+  });
+}
+
+function startSync() {
+  isSyncing = true;
+  const startBtn = document.getElementById('sync-start-btn');
+  const stopBtn = document.getElementById('sync-stop-btn');
+  const progressSection = document.getElementById('sync-progress-section');
+  const completeSection = document.getElementById('sync-complete-section');
+  const headerBtn = document.getElementById('sync-btn');
+
+  if (startBtn) {
+    startBtn.disabled = true;
+    startBtn.innerHTML = `
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18" class="spin">
+        <circle cx="12" cy="12" r="10"/>
+      </svg>
+      Syncing...
+    `;
+    startBtn.classList.add('syncing');
+  }
+  if (stopBtn) stopBtn.style.display = 'block';
+  if (progressSection) progressSection.style.display = 'block';
+  if (completeSection) completeSection.style.display = 'none';
+  if (headerBtn) headerBtn.classList.add('syncing');
+
+  document.getElementById('sync-progress-bar').style.width = '5%';
+
+  // Start the sync - opens Instagram in background tab
+  chrome.runtime.sendMessage({ action: 'SYNC_WITH_INSTAGRAM_BACKGROUND' });
+  
+  // Sync runs in a background tab
+  updateSyncStatus('syncing', 'Syncing...');
+}
+
+function stopSync() {
+  chrome.runtime.sendMessage({ action: 'STOP_SYNC' });
+  const stopBtn = document.getElementById('sync-stop-btn');
+  if (stopBtn) {
+    stopBtn.disabled = true;
+    stopBtn.textContent = 'Stopping...';
+  }
+}
+
+function handleSyncStarted() {
+  document.getElementById('sync-progress-bar').style.width = '10%';
+  updateSyncStatus('syncing', 'Preparing...');
+}
+
+function updateSyncPanelProgress(synced, failed, total = 0) {
+  document.getElementById('sync-synced-count').textContent = synced || 0;
+  document.getElementById('sync-failed-count').textContent = failed || 0;
+
+  const progressBar = document.getElementById('sync-progress-bar');
+  const processed = (synced || 0) + (failed || 0);
+
+  // Only update main page sync status if actively syncing
+  // (not when just displaying saved progress from a previous session)
+  if (isSyncing) {
+    if (total > 0) {
+      const percent = Math.min(99, Math.round((processed / total) * 100));
+      updateSyncStatus('syncing', `Syncing... ${percent}%`);
+    } else if (processed > 0) {
+      updateSyncStatus('syncing', 'Syncing...');
+    }
+  }
+
+  if (progressBar) {
+    if (total > 0) {
+      // Real progress based on total
+      const percent = Math.min(99, Math.round((processed / total) * 100));
+      progressBar.style.width = `${percent}%`;
+    } else if (processed > 0) {
+      // Fallback: use a log scale for progress since we don't know total
+      const progress = Math.min(90, 10 + Math.log10(processed + 1) * 30);
+      progressBar.style.width = `${progress}%`;
+    }
+  }
+}
+
+function handleSyncComplete(syncedCount, failedCount) {
+  isSyncing = false;
+  const startBtn = document.getElementById('sync-start-btn');
+  const stopBtn = document.getElementById('sync-stop-btn');
+  const progressSection = document.getElementById('sync-progress-section');
+  const completeSection = document.getElementById('sync-complete-section');
+  const headerBtn = document.getElementById('sync-btn');
+  const progressBar = document.getElementById('sync-progress-bar');
+
+  if (progressBar) progressBar.style.width = '100%';
+  
+  updateSyncPanelProgress(syncedCount, failedCount);
+
+  if (startBtn) {
+    startBtn.disabled = false;
+    startBtn.innerHTML = `
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+        <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0118.8-4.3M22 12.5a10 10 0 01-18.8 4.3"/>
+      </svg>
+      Sync Again
+    `;
+    startBtn.classList.remove('syncing');
+  }
+  if (stopBtn) {
+    stopBtn.style.display = 'none';
+    stopBtn.disabled = false;
+    stopBtn.textContent = 'Stop Sync';
+  }
+  if (completeSection) completeSection.style.display = 'block';
+  if (headerBtn) headerBtn.classList.remove('syncing');
+
+  // Hide resume info since we completed
+  const resumeInfo = document.getElementById('sync-resume-info');
+  if (resumeInfo) resumeInfo.style.display = 'none';
+
+  // Clear sync status
+  updateSyncStatus('', '');
+
+}
+
+function handleSyncStopped(syncedCount, failedCount) {
+  isSyncing = false;
+  const startBtn = document.getElementById('sync-start-btn');
+  const stopBtn = document.getElementById('sync-stop-btn');
+  const headerBtn = document.getElementById('sync-btn');
+
+  updateSyncPanelProgress(syncedCount, failedCount);
+
+  if (startBtn) {
+    startBtn.disabled = false;
+    startBtn.innerHTML = `
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+        <polygon points="5 3 19 12 5 21 5 3"/>
+      </svg>
+      Resume Sync
+    `;
+    startBtn.classList.remove('syncing');
+  }
+  if (stopBtn) {
+    stopBtn.style.display = 'none';
+    stopBtn.disabled = false;
+    stopBtn.textContent = 'Stop Sync';
+  }
+  if (headerBtn) headerBtn.classList.remove('syncing');
+  
+  
+  // Show resume info
+  checkSyncProgress();
+
+  // Clear sync status
+  updateSyncStatus('', '');
+}
+
+function handleSyncError(error) {
+  isSyncing = false;
+  const startBtn = document.getElementById('sync-start-btn');
+  const stopBtn = document.getElementById('sync-stop-btn');
+  const headerBtn = document.getElementById('sync-btn');
+
+  if (startBtn) {
+    startBtn.disabled = false;
+    startBtn.innerHTML = `
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+        <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0118.8-4.3M22 12.5a10 10 0 01-18.8 4.3"/>
+      </svg>
+      Retry Sync
+    `;
+    startBtn.classList.remove('syncing');
+  }
+  if (stopBtn) stopBtn.style.display = 'none';
+  if (headerBtn) headerBtn.classList.remove('syncing');
+  
+  // Show error in sync status
+  updateSyncStatus('error', `Error: ${error}`);
+  
+  // Clear error after 5 seconds
+  setTimeout(() => {
+    updateSyncStatus('', '');
+  }, 5000);
+}
+
+
+// Update sync status - both in panel and in main content area
 function updateSyncStatus(status, message) {
+  // Update status in main content (visible when panel is closed)
   const statusEl = document.getElementById('sync-status');
-  statusEl.className = `sync-status ${status}`;
-  statusEl.textContent = message;
-  statusEl.style.display = message ? 'block' : 'none';
+  if (statusEl) {
+    statusEl.className = `sync-status ${status}`;
+    statusEl.textContent = message;
+    statusEl.style.display = message ? 'block' : 'none';
+  }
+  
+  // Update status inside sync panel (visible when panel is open)
+  const progressText = document.getElementById('sync-progress-text');
+  if (progressText) {
+    progressText.textContent = message;
+    progressText.style.display = message ? 'flex' : 'none';
+  }
 }
 
 // Show error
@@ -1071,7 +1511,7 @@ function showError(message) {
     <div class="empty-state">
       <div class="empty-icon">📭</div>
       <p>${message}</p>
-      <button class="sync-btn-inline" onclick="handleSync()">
+      <button class="sync-btn-inline" onclick="openSyncPanel()">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" width="18" height="18">
           <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0118.8-4.3M22 12.5a10 10 0 01-18.8 4.3" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>

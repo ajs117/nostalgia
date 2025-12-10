@@ -5,6 +5,9 @@ let activeInstagramTabId = null;
 // Mutex for preventing race conditions in batch saves
 let batchSaveLock = Promise.resolve();
 
+// Sync state
+let isSyncing = false;
+
 chrome.action.onClicked.addListener((tab) => {
   chrome.tabs.create({ url: chrome.runtime.getURL("index.html") }, (newTab) => {
     extensionTabId = newTab.id;
@@ -62,17 +65,51 @@ function updateExtensionTab() {
   });
 }
 
+// Safe message sender that handles closed channels
+function safeSendToTab(tabId, message) {
+  if (!tabId) return;
+  chrome.tabs.sendMessage(tabId, message, () => {
+    if (chrome.runtime.lastError) {
+      // Channel closed, ignore
+    }
+  });
+}
+
+function safeBroadcast(message) {
+  // Send to extension tabs
+  chrome.tabs.query({ url: chrome.runtime.getURL("index.html") }, (tabs) => {
+    if (chrome.runtime.lastError) return;
+    (tabs || []).forEach(tab => safeSendToTab(tab.id, message));
+  });
+}
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  // Handle messages - each must explicitly return true (async) or false (sync)
+  
+  // Ping to wake up service worker
+  if (request.action === "PING") {
+    sendResponse({ success: true });
+    return false;
+  }
+  
   if (request.action === "CAPTURE_IMAGES") {
     capturedImages = request.images;
-  } else if (request.action === "FETCH_IMAGE") {
+    return false;
+  }
+  
+  if (request.action === "FETCH_IMAGE") {
     fetchImageAsDataURL(request.imageUrl)
       .then((dataUrl) => sendResponse({ success: true, dataUrl: dataUrl }))
       .catch((error) => sendResponse({ success: false, error: error.message }));
     return true;
-  } else if (request.action === "GET_CAPTURED_IMAGES") {
+  }
+  
+  if (request.action === "GET_CAPTURED_IMAGES") {
     sendResponse(capturedImages);
-  } else if (request.action === "OPEN_MAIN_VIEWER") {
+    return false;
+  }
+  
+  if (request.action === "OPEN_MAIN_VIEWER") {
     if (extensionTabId !== null) {
       chrome.tabs.get(extensionTabId, (tab) => {
         if (chrome.runtime.lastError || !tab) {
@@ -95,15 +132,19 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         }
       );
     }
-  } else if (request.action === "GET_INSTAGRAM_POSTS") {
+    return false;
+  }
+  
+  if (request.action === "GET_INSTAGRAM_POSTS") {
     // Paginated post retrieval
     const page = request.page || 1;
     const limit = request.limit || 50;
     const sortBy = request.sortBy || 'newest';
     const filterType = request.filterType || 'all';
     const searchQuery = request.searchQuery || '';
+    const hashtagFilter = request.hashtagFilter || null;
     
-    getPostsPaginated(page, limit, sortBy, filterType, searchQuery).then((result) => {
+    getPostsPaginated(page, limit, sortBy, filterType, searchQuery, hashtagFilter).then((result) => {
       sendResponse({ 
         success: true, 
         posts: result.posts,
@@ -116,7 +157,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       sendResponse({ success: false, error: error.message, posts: [], total: 0 });
     });
     return true;
-  } else if (request.action === "GET_COLLECTIONS") {
+  }
+  
+  if (request.action === "GET_COLLECTIONS") {
     getCollectionsFromIndexedDB().then((collections) => {
       sendResponse({ success: true, collections });
     }).catch((error) => {
@@ -124,7 +167,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       sendResponse({ success: false, error: error.message, collections: [] });
     });
     return true;
-  } else if (request.action === "GET_POSTS_COUNT") {
+  }
+  
+  if (request.action === "GET_POSTS_COUNT") {
     // O(1) count retrieval from metadata
     getPostsCount().then((count) => {
       sendResponse({ count });
@@ -133,7 +178,24 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       sendResponse({ count: 0 });
     });
     return true;
-  } else if (request.action === "GET_POSTS_INFO") {
+  }
+  
+  if (request.action === "GET_ALL_HASHTAGS") {
+    // Get all hashtags with counts from all posts
+    // IMPORTANT: Keep reference to sendResponse and return true immediately
+    const responseCallback = sendResponse;
+    getAllHashtagsWithCounts()
+      .then((hashtags) => {
+        responseCallback({ success: true, hashtags: hashtags || [] });
+      })
+      .catch((error) => {
+        console.error("Error getting hashtags:", error);
+        responseCallback({ success: false, hashtags: [] });
+      });
+    return true; // Keep message channel open for async response
+  }
+  
+  if (request.action === "GET_POSTS_INFO") {
     // Get count and check if specific IDs exist
     getPostsMetadata().then((metadata) => {
       sendResponse({ 
@@ -146,43 +208,54 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       sendResponse({ count: 0, ids: [], links: [] });
     });
     return true;
-  } else if (request.action === "SYNC_WITH_INSTAGRAM") {
+  }
+  
+  if (request.action === "SYNC_WITH_INSTAGRAM") {
     chrome.tabs.create({ url: "https://www.instagram.com/" }, (tab) => {
       activeInstagramTabId = tab.id;
       chrome.tabs.onUpdated.addListener(function listener(tabId, info) {
         if (tabId === tab.id && info.status === "complete") {
-          chrome.tabs.sendMessage(tabId, { action: "SHOW_SYNC_DRAWER" });
+          safeSendToTab(tabId, { action: "SHOW_SYNC_DRAWER" });
           chrome.tabs.onUpdated.removeListener(listener);
         }
       });
     });
-  } else if (request.action === "START_SYNC") {
-    if (activeInstagramTabId) {
-      chrome.storage.local.get(["instagram_sync_progress"], (result) => {
-        const isResuming = result.instagram_sync_progress !== undefined;
-        
-        chrome.tabs.sendMessage(activeInstagramTabId, { action: "SHOW_SYNC_DRAWER" }, () => {});
-        
-        chrome.runtime.sendMessage({ action: "SYNC_STARTED" });
-
-        if (!isResuming) {
-          Promise.resolve().then(() => {
-            chrome.tabs.sendMessage(activeInstagramTabId, {
-              action: "IMPORT_INSTAGRAM_POSTS",
-            });
-          }).catch(() => {
-            chrome.tabs.sendMessage(activeInstagramTabId, {
-              action: "IMPORT_INSTAGRAM_POSTS",
-            });
-          });
-        } else {
-          chrome.tabs.sendMessage(activeInstagramTabId, {
-            action: "IMPORT_INSTAGRAM_POSTS",
-          });
+    return false;
+  }
+  
+  if (request.action === "SYNC_WITH_INSTAGRAM_BACKGROUND") {
+    // Open Instagram in a background tab for sync (cookies required)
+    isSyncing = true;
+    chrome.tabs.create({ url: "https://www.instagram.com/", active: false }, (tab) => {
+      activeInstagramTabId = tab.id;
+      
+      chrome.tabs.onUpdated.addListener(function listener(tabId, info) {
+        if (tabId === tab.id && info.status === "complete") {
+          // Start sync via content script after page loads
+          setTimeout(() => {
+            safeSendToTab(tabId, { action: "START_BACKGROUND_SYNC" });
+          }, 1500);
+          chrome.tabs.onUpdated.removeListener(listener);
         }
       });
+    });
+    // Notify UI
+    safeBroadcast({ action: "SYNC_STARTED" });
+    return false;
+  }
+  
+  if (request.action === "START_SYNC") {
+    if (activeInstagramTabId) {
+      chrome.storage.local.get(["instagram_sync_progress"], (result) => {
+        safeSendToTab(activeInstagramTabId, { action: "SHOW_SYNC_DRAWER" });
+        safeBroadcast({ action: "SYNC_STARTED" });
+        safeSendToTab(activeInstagramTabId, { action: "IMPORT_INSTAGRAM_POSTS" });
+      });
     }
-  } else if (request.action === "RETURN_TO_EXTENSION") {
+    return false;
+  }
+  
+  if (request.action === "RETURN_TO_EXTENSION") {
     if (extensionTabId !== null) {
       chrome.tabs.update(extensionTabId, { active: true }, () => {
         setTimeout(updateExtensionTab, 500);
@@ -196,7 +269,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         }
       );
     }
-  } else if (request.action === "SAVE_POSTS_BATCH") {
+    return false;
+  }
+  
+  if (request.action === "SAVE_POSTS_BATCH") {
     // Use mutex to prevent race conditions
     batchSaveLock = batchSaveLock.then(async () => {
       try {
@@ -244,39 +320,90 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       sendResponse({ success: false, error: error.message });
     });
     return true;
-  } else if (request.action === "SAVE_COLLECTIONS") {
-    storeCollectionsInIndexedDB(request.collections).then(() => {
-    }).catch((error) => {
+  }
+  
+  if (request.action === "SAVE_COLLECTIONS") {
+    storeCollectionsInIndexedDB(request.collections).catch((error) => {
       console.error("Error saving collections:", error);
     });
-  } else if (request.action === "SYNC_FINISHED") {
-    chrome.runtime.sendMessage({
+    return false;
+  }
+  
+  if (request.action === "SYNC_FINISHED") {
+    isSyncing = false;
+    const completeMsg = {
       action: "SYNC_COMPLETE",
       syncedCount: request.syncedCount,
       failedCount: request.failedCount,
-    });
+    };
+    safeBroadcast(completeMsg);
     if (activeInstagramTabId) {
-      chrome.tabs.sendMessage(activeInstagramTabId, {
-        action: "SYNC_COMPLETE",
-        syncedCount: request.syncedCount,
-        failedCount: request.failedCount,
-      });
+      safeSendToTab(activeInstagramTabId, completeMsg);
+      // Close the background Instagram tab after sync
+      setTimeout(() => {
+        if (activeInstagramTabId) {
+          chrome.tabs.remove(activeInstagramTabId, () => {
+            if (chrome.runtime.lastError) { /* tab might be closed */ }
+            activeInstagramTabId = null;
+          });
+        }
+      }, 1000);
     }
     setTimeout(updateExtensionTab, 500);
-  } else if (request.action === "IMPORT_FAILED") {
+    return false;
+  }
+  
+  if (request.action === "SYNC_PROGRESS_UPDATE") {
+    // Forward progress updates to the extension tab
+    safeBroadcast({
+      action: "SYNC_PROGRESS",
+      synced: request.synced,
+      failed: request.failed,
+      total: request.total || 0,
+    });
+    return false;
+  }
+  
+  if (request.action === "IMPORT_FAILED") {
+    isSyncing = false;
+    safeBroadcast({ action: "IMPORT_FAILED", error: request.error });
     if (activeInstagramTabId) {
-      chrome.tabs.sendMessage(activeInstagramTabId, {
-        action: "IMPORT_FAILED",
-        error: request.error,
-      });
+      safeSendToTab(activeInstagramTabId, { action: "IMPORT_FAILED", error: request.error });
     }
-  } else if (request.action === "STOP_SYNC") {
+    return false;
+  }
+  
+  if (request.action === "STOP_SYNC") {
+    isSyncing = false;
     if (activeInstagramTabId) {
-      chrome.tabs.sendMessage(activeInstagramTabId, {
-        action: "STOP_SYNC",
-      });
+      safeSendToTab(activeInstagramTabId, { action: "STOP_SYNC" });
     }
-  } else if (request.action === "STORE_MEDIA_IN_IDB") {
+    return false;
+  }
+  
+  if (request.action === "SYNC_STOPPED") {
+    isSyncing = false;
+    const stoppedMsg = {
+      action: "SYNC_STOPPED",
+      syncedCount: request.syncedCount,
+      failedCount: request.failedCount,
+    };
+    safeBroadcast(stoppedMsg);
+    // Close the background tab if sync was stopped
+    if (activeInstagramTabId) {
+      setTimeout(() => {
+        if (activeInstagramTabId) {
+          chrome.tabs.remove(activeInstagramTabId, () => {
+            if (chrome.runtime.lastError) { /* ignore */ }
+            activeInstagramTabId = null;
+          });
+        }
+      }, 500);
+    }
+    return false;
+  }
+  
+  if (request.action === "STORE_MEDIA_IN_IDB") {
     const { key, blob, type, size } = request;
     try {
       let blobObj;
@@ -306,7 +433,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       sendResponse({ success: false, error: error.message });
     }
     return true;
-  } else if (request.action === "FETCH_AND_STORE_THUMBNAIL") {
+  }
+  
+  if (request.action === "FETCH_AND_STORE_THUMBNAIL") {
     const { imageUrl, postId } = request;
     const thumbnailKey = `thumb_${postId}`;
     
@@ -323,7 +452,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       })
       .catch((error) => sendResponse({ success: false, error: error.message }));
     return true;
-  } else if (request.action === "FETCH_VIDEO_CDN") {
+  }
+  
+  if (request.action === "FETCH_VIDEO_CDN") {
     try {
       const { permalink, postId } = request;
       
@@ -578,7 +709,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
     
     return true;
-  } else if (request.action === "FETCH_CAROUSEL_VIDEO") {
+  }
+  
+  if (request.action === "FETCH_CAROUSEL_VIDEO") {
     // Fetch video from a carousel post
     try {
       const { permalink, postId, carouselIndex } = request;
@@ -659,7 +792,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       sendResponse({ success: false, error: error.message });
     }
     return true;
-  } else if (request.action === "FETCH_FULL_IMAGE") {
+  }
+  
+  if (request.action === "FETCH_FULL_IMAGE") {
     // Fetch full-resolution image from Instagram post page
     try {
       const { permalink, postId } = request;
@@ -740,7 +875,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       sendResponse({ success: false, error: error.message });
     }
     return true;
-  } else if (request.action === "CLEAR_STORAGE") {
+  }
+  
+  if (request.action === "CLEAR_STORAGE") {
     Promise.all([
       new Promise((resolve, reject) => {
         const deleteRequest = indexedDB.deleteDatabase(DB_NAME);
@@ -765,7 +902,20 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       sendResponse({ success: false, error: error.message });
     });
     return true;
-  } else if (request.action === "CHECK_POST_EXISTS") {
+  }
+  
+  if (request.action === "CLEAR_ALL_POSTS") {
+    clearAllPosts().then(() => {
+      updateExtensionTab();
+      sendResponse({ success: true });
+    }).catch((error) => {
+      console.error('Error clearing posts:', error);
+      sendResponse({ success: false, error: error.message });
+    });
+    return true;
+  }
+  
+  if (request.action === "CHECK_POST_EXISTS") {
     // Quick check if a post exists by ID or link
     checkPostExists(request.postId, request.link).then((exists) => {
       sendResponse({ exists });
@@ -775,7 +925,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
 
-  return true;
+  return false;
 });
 
 // IndexedDB configuration
@@ -1053,7 +1203,7 @@ async function checkPostExists(postId, link) {
 }
 
 // Get posts with pagination, sorting, and filtering
-async function getPostsPaginated(page = 1, limit = 50, sortBy = 'newest', filterType = 'all', searchQuery = '') {
+async function getPostsPaginated(page = 1, limit = 50, sortBy = 'newest-saved', filterType = 'all', searchQuery = '', hashtagFilter = null) {
   let db;
   try {
     db = await openDB();
@@ -1064,6 +1214,13 @@ async function getPostsPaginated(page = 1, limit = 50, sortBy = 'newest', filter
       
       const allPosts = [];
       const cursorRequest = store.openCursor();
+      
+      // Helper to extract hashtags from text
+      const extractHashtags = (text) => {
+        const hashtagRegex = /#[\w]+/g;
+        const matches = text.match(hashtagRegex);
+        return matches ? matches.map(tag => tag.toLowerCase()) : [];
+      };
       
       cursorRequest.onsuccess = (event) => {
         const cursor = event.target.result;
@@ -1091,20 +1248,57 @@ async function getPostsPaginated(page = 1, limit = 50, sortBy = 'newest', filter
             }
           }
           
+          // Apply hashtag filter
+          if (hashtagFilter) {
+            const caption = post.title || '';
+            const hashtags = extractHashtags(caption);
+            if (!hashtags.includes(hashtagFilter.toLowerCase())) {
+              cursor.continue();
+              return;
+            }
+          }
+          
           allPosts.push(post);
           cursor.continue();
         } else {
           // All posts collected, now sort
-          if (sortBy === 'newest') {
-            allPosts.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-          } else if (sortBy === 'oldest') {
-            allPosts.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
-          } else if (sortBy === 'random') {
-            // Fisher-Yates shuffle
-            for (let i = allPosts.length - 1; i > 0; i--) {
-              const j = Math.floor(Math.random() * (i + 1));
-              [allPosts[i], allPosts[j]] = [allPosts[j], allPosts[i]];
-            }
+          switch (sortBy) {
+            case 'newest-saved':
+            case 'newest':
+              allPosts.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+              break;
+            case 'oldest-saved':
+            case 'oldest':
+              allPosts.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+              break;
+            case 'newest-posted':
+              allPosts.sort((a, b) => (b.takenAt || b.timestamp || 0) - (a.takenAt || a.timestamp || 0));
+              break;
+            case 'oldest-posted':
+              allPosts.sort((a, b) => (a.takenAt || a.timestamp || 0) - (b.takenAt || b.timestamp || 0));
+              break;
+            case 'alphabetical':
+              allPosts.sort((a, b) => {
+                const usernameA = (a.username || '').toLowerCase();
+                const usernameB = (b.username || '').toLowerCase();
+                if (usernameA !== usernameB) {
+                  return usernameA.localeCompare(usernameB);
+                }
+                // Secondary sort by title if same username
+                const titleA = (a.title || '').toLowerCase();
+                const titleB = (b.title || '').toLowerCase();
+                return titleA.localeCompare(titleB);
+              });
+              break;
+            case 'random':
+              // Fisher-Yates shuffle
+              for (let i = allPosts.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [allPosts[i], allPosts[j]] = [allPosts[j], allPosts[i]];
+              }
+              break;
+            default:
+              allPosts.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
           }
           
           const total = allPosts.length;
@@ -1239,6 +1433,110 @@ async function getMediaFromIndexedDB(key) {
   } catch (error) {
     if (db) db.close();
     return null;
+  }
+}
+
+// Get all hashtags with counts from all posts
+async function getAllHashtagsWithCounts() {
+  let db;
+  try {
+    db = await openDB();
+    
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction([STORE_POSTS], "readonly");
+      const store = transaction.objectStore(STORE_POSTS);
+      
+      const hashtagCounts = new Map();
+      const cursorRequest = store.openCursor();
+      
+      // Helper to extract hashtags from text
+      const extractHashtags = (text) => {
+        if (!text || typeof text !== 'string') return [];
+        const hashtagRegex = /#[\w]+/g;
+        const matches = text.match(hashtagRegex);
+        return matches ? matches.map(tag => tag.toLowerCase()) : [];
+      };
+      
+      cursorRequest.onsuccess = (event) => {
+        const cursor = event.target.result;
+        if (cursor) {
+          const post = cursor.value;
+          if (post && post.title) {
+            const caption = post.title || '';
+            extractHashtags(caption).forEach(tag => {
+              if (tag) {
+                hashtagCounts.set(tag, (hashtagCounts.get(tag) || 0) + 1);
+              }
+            });
+          }
+          cursor.continue();
+        } else {
+          // Convert to array and sort by count
+          const hashtags = Array.from(hashtagCounts.entries())
+            .map(([tag, count]) => ({ tag, count }))
+            .sort((a, b) => b.count - a.count);
+          
+          db.close();
+          resolve(hashtags);
+        }
+      };
+      
+      cursorRequest.onerror = () => {
+        db.close();
+        reject(cursorRequest.error || new Error('Cursor error'));
+      };
+      
+      transaction.onerror = () => {
+        db.close();
+        reject(transaction.error || new Error('Transaction error'));
+      };
+    });
+  } catch (error) {
+    if (db) db.close();
+    console.error('Error in getAllHashtagsWithCounts:', error);
+    return Promise.resolve([]); // Return empty array instead of throwing
+  }
+}
+
+// Clear all posts and related data
+async function clearAllPosts() {
+  let db;
+  try {
+    db = await openDB();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(
+        [STORE_POSTS, STORE_POSTS_INDEX, STORE_METADATA, STORE_MEDIA], 
+        "readwrite"
+      );
+      
+      // Clear posts
+      const postsStore = transaction.objectStore(STORE_POSTS);
+      postsStore.clear();
+      
+      // Clear posts index
+      const indexStore = transaction.objectStore(STORE_POSTS_INDEX);
+      indexStore.clear();
+      
+      // Reset metadata
+      const metaStore = transaction.objectStore(STORE_METADATA);
+      metaStore.put(0, 'posts_count');
+      
+      // Clear media (thumbnails)
+      const mediaStore = transaction.objectStore(STORE_MEDIA);
+      mediaStore.clear();
+      
+      transaction.oncomplete = () => {
+        db.close();
+        resolve();
+      };
+      transaction.onerror = () => {
+        db.close();
+        reject(transaction.error);
+      };
+    });
+  } catch (error) {
+    if (db) db.close();
+    throw error;
   }
 }
 

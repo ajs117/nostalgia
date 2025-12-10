@@ -89,12 +89,12 @@ async function build() {
   }
   fs.mkdirSync(distDir, { recursive: true });
   
-  console.log('Building Nostalgia extension...');
+  console.log('Building nostalgia extension...');
   console.log(terser ? '✓ Using Terser for advanced minification' : '⚠ Using basic minifier (install terser for better results)');
   console.log('');
   
   // Copy and minify JS files
-  const jsFiles = ['background.js', 'contentScript.js', 'app.js', 'popup.js'];
+  const jsFiles = ['background.js', 'contentScript.js', 'app.js'];
   const originalSizes = {};
   const minifiedSizes = {};
   
@@ -122,7 +122,7 @@ async function build() {
   console.log('');
   
   // Copy and minify CSS files
-  const cssFiles = ['styles.css', 'popup.css'];
+  const cssFiles = ['styles.css'];
   const cssOriginalSizes = {};
   const cssMinifiedSizes = {};
   
@@ -150,7 +150,7 @@ async function build() {
   console.log('');
   
   // Copy HTML files (no minification needed)
-  const htmlFiles = ['index.html', 'popup.html'];
+  const htmlFiles = ['index.html'];
   htmlFiles.forEach(file => {
     const src = path.join(__dirname, file);
     if (fs.existsSync(src)) {
