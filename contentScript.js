@@ -569,14 +569,21 @@ function updateStatsDisplay(synced, failed) {
 
 async function fetchSavedPosts(maxId = '') {
   try {
+    // Add timeout to prevent hanging on slow/unresponsive requests
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 second timeout
+
     const response = await fetch(
       `https://i.instagram.com/api/v1/feed/saved/posts/?max_id=${maxId}`,
       {
         method: 'GET',
         ...defaultRequest,
-        redirect: 'error'
+        redirect: 'error',
+        signal: controller.signal
       }
     );
+
+    clearTimeout(timeoutId);
 
     // Check for authentication errors
     if (response.status === 401 || response.status === 403) {
@@ -978,7 +985,9 @@ async function getInstagramSavedPosts() {
       return { syncedCount: 0, failedCount: 0 };
     }
 
-    // Track API order - API returns newest saved first, so we increment for each post
+    // Track API order - API returns newest saved first, so we assign timestamps for ordering
+    // Use current time as base, subtract counter to ensure newest posts get lowest values
+    const syncSessionStartTime = Date.now();
     let savedOrderCounter = 0;
 
     const savedProgress = await new Promise((resolve) => {
@@ -1077,8 +1086,8 @@ async function getInstagramSavedPosts() {
           if (foundSavedPostIndex >= 0) {
             const newPostsBeforeSaved = savedPosts.items.slice(0, foundSavedPostIndex);
 
-            // Process posts in parallel batches
-            const PARALLEL_BATCH = 5;
+            // Process posts one at a time to avoid rate limiting
+            const PARALLEL_BATCH = 1;
             for (let i = 0; i < newPostsBeforeSaved.length && isSyncing; i += PARALLEL_BATCH) {
               if (!isSyncing) break; // Check before processing batch
 
@@ -1086,7 +1095,7 @@ async function getInstagramSavedPosts() {
 
               const results = await Promise.allSettled(
                 batch.map((post) => {
-                  const order = savedOrderCounter++;
+                  const order = syncSessionStartTime - savedOrderCounter++;
                   return processPost(post, order);
                 })
               );
@@ -1130,8 +1139,8 @@ async function getInstagramSavedPosts() {
 
           maxId = savedPosts.next_max_id;
 
-          // Process posts in parallel batches for better performance
-          const PARALLEL_BATCH = 5; // Process 5 thumbnails at a time
+          // Process posts one at a time to avoid rate limiting
+          const PARALLEL_BATCH = 1; // Process one at a time to avoid Instagram rate limiting
           for (let i = 0; i < newPostsInBatch.length && isSyncing; i += PARALLEL_BATCH) {
             if (!isSyncing) break; // Check before processing batch
 
@@ -1140,7 +1149,7 @@ async function getInstagramSavedPosts() {
             // Process batch in parallel - API returns newest first, so we preserve that order
             const results = await Promise.allSettled(
               batch.map((post) => {
-                const order = savedOrderCounter++;
+                const order = syncSessionStartTime - savedOrderCounter++;
                 return processPost(post, order);
               })
             );
@@ -1172,7 +1181,7 @@ async function getInstagramSavedPosts() {
 
         if (!isSyncing) break; // Check before delay
 
-        // Reduced delay - only 500ms between API calls for better performance
+        // Delay between API calls for better performance
         // But check isSyncing during delay to stop faster
         await new Promise((resolve) => {
           const checkInterval = setInterval(() => {

@@ -312,7 +312,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
               carouselCount: carouselCount || 0,
               timestamp: post.timestamp || Date.now(),
               takenAt: post.takenAt || post.timestamp || Date.now(),
-              savedOrder: post.savedOrder !== undefined ? post.savedOrder : Number.MAX_SAFE_INTEGER // Preserve API order
+              savedOrder: post.savedOrder // Preserve API order from sync
             };
           })
           .filter(Boolean);

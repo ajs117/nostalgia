@@ -1382,6 +1382,28 @@ select:hover {
   line-height: 1.5;
 }
 
+.sync-info-notice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  background: rgba(76, 175, 80, 0.1);
+  border: 1px solid rgba(76, 175, 80, 0.3);
+  border-radius: var(--radius-md);
+  margin-bottom: 20px;
+  font-size: 13px;
+}
+
+.sync-info-notice .info-icon {
+  font-size: 18px;
+  flex-shrink: 0;
+}
+
+.sync-info-notice .info-text {
+  line-height: 1.5;
+  color: var(--text-primary);
+}
+
 .sync-login-notice {
   display: flex;
   align-items: center;
