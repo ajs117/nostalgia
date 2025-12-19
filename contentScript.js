@@ -157,7 +157,7 @@ function _createSyncDrawer() {
         const posts = JSON.parse(postsData);
         hasExistingPosts = Array.isArray(posts) && posts.length > 0;
       }
-    } catch (error) {}
+    } catch (error) { }
 
     const hasProgress = result[SYNC_PROGRESS_KEY];
     const shouldResume = hasExistingPosts || hasProgress;
@@ -702,7 +702,7 @@ async function fetchTotalSavedCount() {
       // Look for ALL_MEDIA_AUTO_COLLECTION first (the "All Posts" collection)
       const allPostsCollection = data.items.find(
         item => item.collection_type === 'ALL_MEDIA_AUTO_COLLECTION' ||
-                item.collection_name === 'All Posts'
+          item.collection_name === 'All Posts'
       );
 
       if (allPostsCollection) {
@@ -987,8 +987,21 @@ async function getInstagramSavedPosts() {
 
     // Track API order - API returns newest saved first, so we assign timestamps for ordering
     // Use current time as base, subtract counter to ensure newest posts get lowest values
-    const syncSessionStartTime = Date.now();
-    let savedOrderCounter = 0;
+    const dbBounds = await new Promise((resolve) => {
+      chrome.runtime.sendMessage({ action: 'GET_DB_BOUNDS' }, (response) => {
+        resolve(response || { min: null, max: null });
+      });
+    });
+
+    // Initialize counters for savedOrder
+    // High numbers = Newer posts. Low numbers = Older posts.
+    let topOrderCounter = dbBounds.max !== null ? dbBounds.max : Date.now();
+    let bottomOrderCounter = dbBounds.min !== null ? dbBounds.min : Date.now();
+
+    // Safety check - ensures we don't overlap if something is weird
+    if (topOrderCounter < bottomOrderCounter) {
+      topOrderCounter = bottomOrderCounter;
+    }
 
     const savedProgress = await new Promise((resolve) => {
       chrome.storage.local.get([SYNC_PROGRESS_KEY], (result) => {
@@ -1094,11 +1107,15 @@ async function getInstagramSavedPosts() {
               const batch = newPostsBeforeSaved.slice(i, i + PARALLEL_BATCH);
 
               const results = await Promise.allSettled(
-                batch.map((post) => {
-                  const order = syncSessionStartTime - savedOrderCounter++;
+                batch.map((post, batchIndex) => {
+                  // This loop (finding connection) is always processing New/Top posts
+                  // Logic: P0(Newest) > P1 > ... > TopOrderCounter
+                  const order = topOrderCounter + (batch.length - batchIndex);
                   return processPost(post, order);
                 })
               );
+
+              topOrderCounter += batch.length;
 
               if (!isSyncing) break; // Check after processing batch
 
@@ -1147,12 +1164,30 @@ async function getInstagramSavedPosts() {
             const batch = newPostsInBatch.slice(i, i + PARALLEL_BATCH);
 
             // Process batch in parallel - API returns newest first, so we preserve that order
+            // checkingNewPosts=true means we are scanning for connection -> TOP mode
+            // checkingNewPosts=false means we are filling gaps/history -> BOTTOM mode
+            const isTopMode = checkingNewPosts;
+
+            // Process batch in parallel - API returns newest first, so we preserve that order
             const results = await Promise.allSettled(
-              batch.map((post) => {
-                const order = syncSessionStartTime - savedOrderCounter++;
+              batch.map((post, batchIndex) => {
+                let order;
+                if (isTopMode) {
+                  // New/Top posts: Ascending above Max
+                  order = topOrderCounter + (batch.length - batchIndex);
+                } else {
+                  // History/Bottom posts: Descending below Min
+                  order = bottomOrderCounter - 1 - batchIndex;
+                }
                 return processPost(post, order);
               })
             );
+
+            if (isTopMode) {
+              topOrderCounter += batch.length;
+            } else {
+              bottomOrderCounter -= batch.length;
+            }
 
             if (!isSyncing) break; // Check after processing batch
 

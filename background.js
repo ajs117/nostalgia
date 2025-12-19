@@ -581,25 +581,25 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                       try {
                         checkTabExists(tabId, (tabInfo, error) => {
                           if (error) {
-                            if (shouldCloseTab) chrome.tabs.remove(tabId, () => {});
+                            if (shouldCloseTab) chrome.tabs.remove(tabId, () => { });
                             safeSendResponse({ success: false, error: `Tab error: ${error}` });
                             return;
                           }
 
                           if (!tabInfo.url || !tabInfo.url.includes('instagram.com')) {
-                            if (shouldCloseTab) chrome.tabs.remove(tabId, () => {});
+                            if (shouldCloseTab) chrome.tabs.remove(tabId, () => { });
                             safeSendResponse({ success: false, error: 'Page redirected' });
                             return;
                           }
 
                           if (tabInfo.url.startsWith('chrome://') || tabInfo.url.startsWith('chrome-error://')) {
-                            if (shouldCloseTab) chrome.tabs.remove(tabId, () => {});
+                            if (shouldCloseTab) chrome.tabs.remove(tabId, () => { });
                             safeSendResponse({ success: false, error: 'Page error' });
                             return;
                           }
 
                           if (tabInfo.url && !tabInfo.url.includes('/p/') && !tabInfo.url.includes('/reel/')) {
-                            if (shouldCloseTab) chrome.tabs.remove(tabId, () => {});
+                            if (shouldCloseTab) chrome.tabs.remove(tabId, () => { });
                             safeSendResponse({ success: false, error: `Page redirected to: ${tabInfo.url}` });
                             return;
                           }
@@ -614,13 +614,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                             }
                           }, (testResults) => {
                             if (chrome.runtime.lastError) {
-                              if (shouldCloseTab) chrome.tabs.remove(tabId, () => {});
+                              if (shouldCloseTab) chrome.tabs.remove(tabId, () => { });
                               safeSendResponse({ success: false, error: 'Page not accessible' });
                               return;
                             }
 
                             if (!testResults || !testResults[0] || testResults[0].result?.error) {
-                              if (shouldCloseTab) chrome.tabs.remove(tabId, () => {});
+                              if (shouldCloseTab) chrome.tabs.remove(tabId, () => { });
                               safeSendResponse({ success: false, error: 'Page validation failed' });
                               return;
                             }
@@ -631,7 +631,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                             }, (results) => {
                               try {
                                 if (chrome.runtime.lastError) {
-                                  if (shouldCloseTab) chrome.tabs.remove(tabId, () => {});
+                                  if (shouldCloseTab) chrome.tabs.remove(tabId, () => { });
                                   safeSendResponse({ success: false, error: 'Script error' });
                                   return;
                                 }
@@ -679,7 +679,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                         });
                       } catch (error) {
                         cleanupListeners();
-                        if (shouldCloseTab) chrome.tabs.remove(tabId, () => {});
+                        if (shouldCloseTab) chrome.tabs.remove(tabId, () => { });
                         safeSendResponse({ success: false, error: error.message });
                       }
                     }, 3000);
@@ -687,7 +687,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 } catch (error) {
                   clearInterval(checkTab);
                   cleanupListeners();
-                  if (shouldCloseTab) chrome.tabs.remove(tabId, () => {});
+                  if (shouldCloseTab) chrome.tabs.remove(tabId, () => { });
                   safeSendResponse({ success: false, error: error.message });
                 }
               });
@@ -705,13 +705,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             } catch (error) {
               clearInterval(checkTab);
               cleanupListeners();
-              if (shouldCloseTab) chrome.tabs.remove(tabId, () => {});
+              if (shouldCloseTab) chrome.tabs.remove(tabId, () => { });
               safeSendResponse({ success: false, error: error.message });
             }
           }, 500);
         } catch (error) {
           cleanupListeners();
-          if (shouldCloseTab) chrome.tabs.remove(tabId, () => {});
+          if (shouldCloseTab) chrome.tabs.remove(tabId, () => { });
           safeSendResponse({ success: false, error: error.message });
         }
       }
@@ -774,7 +774,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                   func: extractCarouselVideo,
                   args: [carouselIndex]
                 }, (results) => {
-                  chrome.tabs.remove(tabId, () => {});
+                  chrome.tabs.remove(tabId, () => { });
 
                   if (chrome.runtime.lastError || !results || !results[0]) {
                     safeSendResponse({ success: false, error: 'Script error' });
@@ -793,7 +793,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
             if (attempts >= maxAttempts) {
               clearInterval(checkTab);
-              chrome.tabs.remove(tabId, () => {});
+              chrome.tabs.remove(tabId, () => { });
               safeSendResponse({ success: false, error: 'Timeout' });
             }
           });
@@ -857,7 +857,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                   func: extractFullResImage
                 }, (results) => {
                   // Close the tab
-                  chrome.tabs.remove(tabId, () => {});
+                  chrome.tabs.remove(tabId, () => { });
 
                   if (chrome.runtime.lastError || !results || !results[0]) {
                     safeSendResponse({ success: false, error: 'Script error' });
@@ -876,7 +876,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
             if (attempts >= maxAttempts) {
               clearInterval(checkTab);
-              chrome.tabs.remove(tabId, () => {});
+              chrome.tabs.remove(tabId, () => { });
               safeSendResponse({ success: false, error: 'Timeout' });
             }
           });
@@ -932,6 +932,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       sendResponse({ exists });
     }).catch(() => {
       sendResponse({ exists: false });
+    });
+    return true;
+  }
+
+  if (request.action === 'GET_DB_BOUNDS') {
+    getDbBounds().then((bounds) => {
+      sendResponse(bounds);
+    }).catch((error) => {
+      console.error('Error getting DB bounds:', error);
+      sendResponse({ min: null, max: null });
     });
     return true;
   }
@@ -1001,196 +1011,106 @@ function openDB() {
   });
 }
 
-// Add posts individually with duplicate checking
+// Add posts with efficient duplicate checking using direct store lookups
 async function addPostsToIndexedDB(posts) {
   let db;
   try {
     db = await openDB();
 
     return new Promise((resolve, reject) => {
-      const transaction = db.transaction([STORE_POSTS, STORE_POSTS_INDEX, STORE_METADATA], 'readwrite');
+      const transaction = db.transaction([STORE_POSTS, STORE_METADATA], 'readwrite');
       const postsStore = transaction.objectStore(STORE_POSTS);
-      const indexStore = transaction.objectStore(STORE_POSTS_INDEX);
       const metaStore = transaction.objectStore(STORE_METADATA);
 
       let addedCount = 0;
       let processedCount = 0;
+      const totalPosts = posts.length;
 
-      // Get current index
-      const getIndexRequest = indexStore.get('post_ids');
-      getIndexRequest.onsuccess = () => {
-        const existingIds = new Set(getIndexRequest.result || []);
-        const existingLinks = new Set();
+      if (totalPosts === 0) {
+        db.close();
+        resolve(0);
+        return;
+      }
 
-        // Get existing links
-        const getLinksRequest = indexStore.get('post_links');
-        getLinksRequest.onsuccess = () => {
-          const links = getLinksRequest.result || [];
-          links.forEach(l => existingLinks.add(l));
+      // Process each post using direct lookups (more efficient than loading all IDs)
+      posts.forEach((post) => {
+        // Try to get existing post by ID first (primary key lookup - O(1))
+        const getRequest = postsStore.get(post.id);
 
-          // Process each post
-          posts.forEach((post) => {
-            // Check for duplicates - if exists, preserve original timestamp
-            const existsById = existingIds.has(post.id);
-            const existsByLink = post.link && existingLinks.has(post.link);
+        getRequest.onsuccess = () => {
+          const existingPost = getRequest.result;
 
-            if (existsById || existsByLink) {
-              // Get existing post to preserve timestamp
-              // Try ID first, then link if ID lookup fails
-              const getRequest = existsById ? postsStore.get(post.id) : null;
-
-              if (getRequest) {
-                getRequest.onsuccess = () => {
-                  const existingPost = getRequest.result;
-                  if (existingPost) {
-                    // Preserve original timestamp and savedOrder when updating
-                    if (existingPost.timestamp) {
-                      post.timestamp = existingPost.timestamp;
-                    }
-                    if (existingPost.savedOrder !== undefined) {
-                      post.savedOrder = existingPost.savedOrder;
-                    }
-                  }
-                  const updateRequest = postsStore.put(post);
-                  updateRequest.onsuccess = () => {
-                    processedCount++;
-                    checkComplete();
-                  };
-                  updateRequest.onerror = () => {
-                    processedCount++;
-                    checkComplete();
-                  };
-                };
-                getRequest.onerror = () => {
-                  // If ID lookup fails, try link-based lookup using cursor
-                  if (existsByLink && post.link) {
-                    const linkIndex = postsStore.index('link');
-                    const linkCursor = linkIndex.openCursor(post.link);
-                    linkCursor.onsuccess = (event) => {
-                      const cursor = event.target.result;
-                      if (cursor) {
-                        const existingPost = cursor.value;
-                        if (existingPost) {
-                          // Preserve original timestamp and savedOrder when updating
-                          if (existingPost.timestamp) {
-                            post.timestamp = existingPost.timestamp;
-                          }
-                          if (existingPost.savedOrder !== undefined) {
-                            post.savedOrder = existingPost.savedOrder;
-                          }
-                        }
-                        const updateRequest = postsStore.put(post);
-                        updateRequest.onsuccess = () => {
-                          processedCount++;
-                          checkComplete();
-                        };
-                        updateRequest.onerror = () => {
-                          processedCount++;
-                          checkComplete();
-                        };
-                      } else {
-                        // No post found with this link, proceed with update
-                        const updateRequest = postsStore.put(post);
-                        updateRequest.onsuccess = () => {
-                          processedCount++;
-                          checkComplete();
-                        };
-                        updateRequest.onerror = () => {
-                          processedCount++;
-                          checkComplete();
-                        };
-                      }
-                    };
-                    linkCursor.onerror = () => {
-                      processedCount++;
-                      checkComplete();
-                    };
-                  } else {
-                    processedCount++;
-                    checkComplete();
-                  }
-                };
-              } else if (existsByLink && post.link) {
-                // Look up by link index using cursor
-                const linkIndex = postsStore.index('link');
-                const linkCursor = linkIndex.openCursor(post.link);
-                linkCursor.onsuccess = (event) => {
-                  const cursor = event.target.result;
-                  if (cursor) {
-                    const existingPost = cursor.value;
-                    if (existingPost) {
-                      // Preserve original timestamp and savedOrder when updating
-                      if (existingPost.timestamp) {
-                        post.timestamp = existingPost.timestamp;
-                      }
-                      if (existingPost.savedOrder !== undefined) {
-                        post.savedOrder = existingPost.savedOrder;
-                      }
-                    }
-                    const updateRequest = postsStore.put(post);
-                    updateRequest.onsuccess = () => {
-                      processedCount++;
-                      checkComplete();
-                    };
-                    updateRequest.onerror = () => {
-                      processedCount++;
-                      checkComplete();
-                    };
-                  } else {
-                    // No post found with this link, proceed with update
-                    const updateRequest = postsStore.put(post);
-                    updateRequest.onsuccess = () => {
-                      processedCount++;
-                      checkComplete();
-                    };
-                    updateRequest.onerror = () => {
-                      processedCount++;
-                      checkComplete();
-                    };
-                  }
-                };
-                linkCursor.onerror = () => {
-                  processedCount++;
-                  checkComplete();
-                };
-              } else {
-                processedCount++;
-                checkComplete();
-              }
-              return;
+          if (existingPost) {
+            // Post exists by ID - preserve original timestamp and savedOrder
+            if (existingPost.timestamp) {
+              post.timestamp = existingPost.timestamp;
             }
+            if (existingPost.savedOrder !== undefined) {
+              post.savedOrder = existingPost.savedOrder;
+            }
+            // Update existing post
+            postsStore.put(post);
+            processedCount++;
+            checkComplete();
+          } else if (post.link) {
+            // Check by link index if ID not found
+            const linkIndex = postsStore.index('link');
+            const linkRequest = linkIndex.get(post.link);
 
-            // Add new post
-            const addRequest = postsStore.put(post);
-            addRequest.onsuccess = () => {
+            linkRequest.onsuccess = () => {
+              const existingByLink = linkRequest.result;
+              if (existingByLink) {
+                // Post exists by link - preserve timestamp and savedOrder
+                if (existingByLink.timestamp) {
+                  post.timestamp = existingByLink.timestamp;
+                }
+                if (existingByLink.savedOrder !== undefined) {
+                  post.savedOrder = existingByLink.savedOrder;
+                }
+                postsStore.put(post);
+              } else {
+                // New post
+                postsStore.put(post);
+                addedCount++;
+              }
+              processedCount++;
+              checkComplete();
+            };
+
+            linkRequest.onerror = () => {
+              // On error, try to add anyway
+              postsStore.put(post);
               addedCount++;
-              existingIds.add(post.id);
-              if (post.link) existingLinks.add(post.link);
               processedCount++;
               checkComplete();
             };
-            addRequest.onerror = () => {
-              processedCount++;
-              checkComplete();
-            };
-          });
-
-          if (posts.length === 0) {
+          } else {
+            // No link and no existing ID - add as new
+            postsStore.put(post);
+            addedCount++;
+            processedCount++;
             checkComplete();
           }
         };
 
-        function checkComplete() {
-          if (processedCount === posts.length) {
-            // Update index
-            indexStore.put([...existingIds], 'post_ids');
-            indexStore.put([...existingLinks], 'post_links');
+        getRequest.onerror = () => {
+          // On error, try to add anyway
+          postsStore.put(post);
+          addedCount++;
+          processedCount++;
+          checkComplete();
+        };
+      });
 
-            // Update count in metadata
-            metaStore.put(existingIds.size, 'posts_count');
-          }
+      function checkComplete() {
+        if (processedCount === totalPosts) {
+          // Update count efficiently using store.count()
+          const countRequest = postsStore.count();
+          countRequest.onsuccess = () => {
+            metaStore.put(countRequest.result, 'posts_count');
+          };
         }
-      };
+      }
 
       transaction.oncomplete = () => {
         db.close();
@@ -1302,48 +1222,114 @@ async function getPostsMetadata() {
   }
 }
 
-// Check if a post exists
+// Check if a post exists using direct store lookups
 async function checkPostExists(postId, link) {
   let db;
   try {
     db = await openDB();
     return new Promise((resolve) => {
-      const transaction = db.transaction([STORE_POSTS_INDEX], 'readonly');
-      const store = transaction.objectStore(STORE_POSTS_INDEX);
+      const transaction = db.transaction([STORE_POSTS], 'readonly');
+      const store = transaction.objectStore(STORE_POSTS);
 
-      const idsRequest = store.get('post_ids');
-      idsRequest.onsuccess = () => {
-        const ids = new Set(idsRequest.result || []);
-        if (postId && ids.has(postId)) {
-          db.close();
-          resolve(true);
-          return;
-        }
-
-        if (link) {
-          const linksRequest = store.get('post_links');
-          linksRequest.onsuccess = () => {
-            const links = new Set(linksRequest.result || []);
+      // Check by ID first (O(1) primary key lookup)
+      if (postId) {
+        const getRequest = store.get(postId);
+        getRequest.onsuccess = () => {
+          if (getRequest.result) {
             db.close();
-            resolve(links.has(link));
-          };
-          linksRequest.onerror = () => {
+            resolve(true);
+            return;
+          }
+
+          // ID not found, check by link if provided
+          if (link) {
+            const linkIndex = store.index('link');
+            const linkRequest = linkIndex.get(link);
+            linkRequest.onsuccess = () => {
+              db.close();
+              resolve(!!linkRequest.result);
+            };
+            linkRequest.onerror = () => {
+              db.close();
+              resolve(false);
+            };
+          } else {
             db.close();
             resolve(false);
-          };
-        } else {
+          }
+        };
+        getRequest.onerror = () => {
           db.close();
           resolve(false);
-        }
-      };
-      idsRequest.onerror = () => {
+        };
+      } else if (link) {
+        // No ID, check by link
+        const linkIndex = store.index('link');
+        const linkRequest = linkIndex.get(link);
+        linkRequest.onsuccess = () => {
+          db.close();
+          resolve(!!linkRequest.result);
+        };
+        linkRequest.onerror = () => {
+          db.close();
+          resolve(false);
+        };
+      } else {
         db.close();
         resolve(false);
-      };
+      }
     });
   } catch (error) {
     if (db) db.close();
     return false;
+  }
+}
+
+// Get min and max savedOrder from DB
+async function getDbBounds() {
+  let db;
+  try {
+    db = await openDB();
+    return new Promise((resolve) => {
+      const transaction = db.transaction([STORE_POSTS], 'readonly');
+      const store = transaction.objectStore(STORE_POSTS);
+      const index = store.index('savedOrder');
+
+      let minOrder = null;
+      let maxOrder = null;
+
+      // Get min
+      const minRequest = index.openCursor(null, 'next');
+      minRequest.onsuccess = (e) => {
+        const cursor = e.target.result;
+        if (cursor) {
+          minOrder = cursor.value.savedOrder;
+        }
+
+        // Get max
+        const maxRequest = index.openCursor(null, 'prev');
+        maxRequest.onsuccess = (e) => {
+          const cursor = e.target.result;
+          if (cursor) {
+            maxOrder = cursor.value.savedOrder;
+          }
+
+          db.close();
+          resolve({ min: minOrder, max: maxOrder });
+        };
+        maxRequest.onerror = () => {
+          db.close();
+          resolve({ min: minOrder, max: null });
+        };
+      };
+      minRequest.onerror = () => {
+        db.close();
+        resolve({ min: null, max: null });
+      };
+    });
+  } catch (error) {
+    if (db) db.close();
+    return { min: null, max: null };
   }
 }
 
@@ -1392,82 +1378,158 @@ async function getPostsPaginated(page = 1, limit = 50, sortBy = 'newest-saved', 
       // For saved-order-based sorts (newest/oldest saved), use savedOrder index
       // API returns newest first, so lower savedOrder = newer
       const useSavedOrderIndex = (sortBy === 'newest-saved' || sortBy === 'newest' ||
-                                   sortBy === 'oldest-saved' || sortBy === 'oldest') &&
-                                  !searchQuery && !hashtagFilter && filterType === 'all';
+        sortBy === 'oldest-saved' || sortBy === 'oldest') &&
+        !searchQuery && !hashtagFilter && filterType === 'all';
 
       // For posted-date-based sorts, use takenAt index
       const useTakenAtIndex = (sortBy === 'newest-posted' || sortBy === 'oldest-posted') &&
-                               !searchQuery && !hashtagFilter && filterType === 'all';
+        !searchQuery && !hashtagFilter && filterType === 'all';
 
       if (useSavedOrderIndex) {
-        // Fast path: use savedOrder index for saved sorts
+        // Fast path: use savedOrder index with cursor advancement for true pagination
         const index = store.index('savedOrder');
-        // For newest saved: ascending (lower savedOrder = newer, API returns newest first)
-        // For oldest saved: descending (higher savedOrder = older)
-        const direction = (sortBy === 'newest-saved' || sortBy === 'newest') ? 'next' : 'prev';
+        // For newest saved: descending (higher savedOrder = newer)
+        // For oldest saved: ascending (lower savedOrder = older)
+        const direction = (sortBy === 'newest-saved' || sortBy === 'newest') ? 'prev' : 'next';
 
-        const allIndexedPosts = [];
-        const cursorRequest = index.openCursor(null, direction);
+        // Get total count first (O(1) operation)
+        const countRequest = store.count();
+        countRequest.onsuccess = () => {
+          const total = countRequest.result;
+          const startIdx = (page - 1) * limit;
 
-        cursorRequest.onsuccess = (event) => {
-          const cursor = event.target.result;
-          if (cursor) {
-            allIndexedPosts.push(cursor.value);
-            cursor.continue();
-          } else {
-            // All posts collected, paginate
-            const total = allIndexedPosts.length;
-            const startIdx = (page - 1) * limit;
-            const endIdx = startIdx + limit;
-            const paginatedPosts = allIndexedPosts.slice(startIdx, endIdx);
-
+          // If start is beyond total, return empty
+          if (startIdx >= total) {
             db.close();
-            resolve({
-              posts: paginatedPosts,
-              total,
-              hasMore: endIdx < total,
-              page
-            });
+            resolve({ posts: [], total, hasMore: false, page });
+            return;
           }
+
+          const paginatedPosts = [];
+          let skipped = false;
+          let collected = 0;
+
+          const cursorRequest = index.openCursor(null, direction);
+
+          cursorRequest.onsuccess = (event) => {
+            const cursor = event.target.result;
+            if (!cursor) {
+              // No more results
+              db.close();
+              resolve({
+                posts: paginatedPosts,
+                total,
+                hasMore: startIdx + collected < total,
+                page
+              });
+              return;
+            }
+
+            // Skip to start position on first iteration
+            if (!skipped && startIdx > 0) {
+              skipped = true;
+              cursor.advance(startIdx);
+              return;
+            }
+
+            // Collect posts up to limit
+            if (collected < limit) {
+              paginatedPosts.push(cursor.value);
+              collected++;
+              cursor.continue();
+            } else {
+              // We have enough posts
+              db.close();
+              resolve({
+                posts: paginatedPosts,
+                total,
+                hasMore: startIdx + collected < total,
+                page
+              });
+            }
+          };
+
+          cursorRequest.onerror = () => {
+            db.close();
+            reject(cursorRequest.error);
+          };
         };
 
-        cursorRequest.onerror = () => {
+        countRequest.onerror = () => {
           db.close();
-          reject(cursorRequest.error);
+          reject(countRequest.error);
         };
       } else if (useTakenAtIndex) {
-        // Fast path: use takenAt index for posted sorts
+        // Fast path: use takenAt index with cursor advancement for true pagination
         const index = store.index('takenAt');
         const direction = (sortBy === 'newest-posted') ? 'prev' : 'next';
 
-        const allIndexedPosts = [];
-        const cursorRequest = index.openCursor(null, direction);
+        // Get total count first (O(1) operation)
+        const countRequest = store.count();
+        countRequest.onsuccess = () => {
+          const total = countRequest.result;
+          const startIdx = (page - 1) * limit;
 
-        cursorRequest.onsuccess = (event) => {
-          const cursor = event.target.result;
-          if (cursor) {
-            allIndexedPosts.push(cursor.value);
-            cursor.continue();
-          } else {
-            // All posts collected, paginate
-            const total = allIndexedPosts.length;
-            const startIdx = (page - 1) * limit;
-            const endIdx = startIdx + limit;
-            const paginatedPosts = allIndexedPosts.slice(startIdx, endIdx);
-
+          // If start is beyond total, return empty
+          if (startIdx >= total) {
             db.close();
-            resolve({
-              posts: paginatedPosts,
-              total,
-              hasMore: endIdx < total,
-              page
-            });
+            resolve({ posts: [], total, hasMore: false, page });
+            return;
           }
+
+          const paginatedPosts = [];
+          let skipped = false;
+          let collected = 0;
+
+          const cursorRequest = index.openCursor(null, direction);
+
+          cursorRequest.onsuccess = (event) => {
+            const cursor = event.target.result;
+            if (!cursor) {
+              // No more results
+              db.close();
+              resolve({
+                posts: paginatedPosts,
+                total,
+                hasMore: startIdx + collected < total,
+                page
+              });
+              return;
+            }
+
+            // Skip to start position on first iteration
+            if (!skipped && startIdx > 0) {
+              skipped = true;
+              cursor.advance(startIdx);
+              return;
+            }
+
+            // Collect posts up to limit
+            if (collected < limit) {
+              paginatedPosts.push(cursor.value);
+              collected++;
+              cursor.continue();
+            } else {
+              // We have enough posts
+              db.close();
+              resolve({
+                posts: paginatedPosts,
+                total,
+                hasMore: startIdx + collected < total,
+                page
+              });
+            }
+          };
+
+          cursorRequest.onerror = () => {
+            db.close();
+            reject(cursorRequest.error);
+          };
         };
 
-        cursorRequest.onerror = () => {
+        countRequest.onerror = () => {
           db.close();
-          reject(cursorRequest.error);
+          reject(countRequest.error);
         };
       } else {
         // Slow path: load all, filter, sort, paginate (for complex sorts/filters)
@@ -1489,12 +1551,12 @@ async function getPostsPaginated(page = 1, limit = 50, sortBy = 'newest-saved', 
             switch (sortBy) {
             case 'newest-saved':
             case 'newest':
-              // Use savedOrder - API returns newest first, so lower savedOrder = newer
+              // Use savedOrder - higher savedOrder = newer
               allPosts.sort((a, b) => {
-                const orderA = a.savedOrder !== undefined ? a.savedOrder : Number.MAX_SAFE_INTEGER;
-                const orderB = b.savedOrder !== undefined ? b.savedOrder : Number.MAX_SAFE_INTEGER;
+                const orderA = a.savedOrder !== undefined ? a.savedOrder : Number.MIN_SAFE_INTEGER;
+                const orderB = b.savedOrder !== undefined ? b.savedOrder : Number.MIN_SAFE_INTEGER;
                 if (orderA !== orderB) {
-                  return orderA - orderB; // Ascending: lower order = newer
+                  return orderB - orderA; // Descending: higher order = newer
                 }
                 // Secondary sort by ID for stability
                 return (a.id || '').localeCompare(b.id || '');
@@ -1502,12 +1564,12 @@ async function getPostsPaginated(page = 1, limit = 50, sortBy = 'newest-saved', 
               break;
             case 'oldest-saved':
             case 'oldest':
-              // Use savedOrder - reverse of newest (descending)
+              // Use savedOrder - lower savedOrder = older
               allPosts.sort((a, b) => {
                 const orderA = a.savedOrder !== undefined ? a.savedOrder : Number.MAX_SAFE_INTEGER;
                 const orderB = b.savedOrder !== undefined ? b.savedOrder : Number.MAX_SAFE_INTEGER;
                 if (orderA !== orderB) {
-                  return orderB - orderA; // Descending: higher order = older
+                  return orderA - orderB; // Ascending: lower order = older
                 }
                 // Secondary sort by ID for stability
                 return (a.id || '').localeCompare(b.id || '');
@@ -1697,60 +1759,119 @@ async function _getMediaFromIndexedDB(key) {
   }
 }
 
-// Get all hashtags with counts from all posts
+// Get all hashtags with counts from all posts (with caching)
 async function getAllHashtagsWithCounts() {
   let db;
   try {
     db = await openDB();
 
     return new Promise((resolve, reject) => {
-      const transaction = db.transaction([STORE_POSTS], 'readonly');
+      const transaction = db.transaction([STORE_POSTS, STORE_METADATA], 'readwrite');
       const store = transaction.objectStore(STORE_POSTS);
+      const metaStore = transaction.objectStore(STORE_METADATA);
 
-      const hashtagCounts = new Map();
-      const cursorRequest = store.openCursor();
+      // Check cache first
+      const cacheRequest = metaStore.get('hashtags_cache');
+      const countRequest = store.count();
 
-      // Helper to extract hashtags from text
-      const extractHashtags = (text) => {
-        if (!text || typeof text !== 'string') return [];
-        const hashtagRegex = /#[\w]+/g;
-        const matches = text.match(hashtagRegex);
-        return matches ? matches.map(tag => tag.toLowerCase()) : [];
+      let currentCount = 0;
+      let cacheData = null;
+
+      countRequest.onsuccess = () => {
+        currentCount = countRequest.result;
       };
 
-      cursorRequest.onsuccess = (event) => {
-        const cursor = event.target.result;
-        if (cursor) {
-          const post = cursor.value;
-          if (post && post.title) {
-            const caption = post.title || '';
-            extractHashtags(caption).forEach(tag => {
-              if (tag) {
-                hashtagCounts.set(tag, (hashtagCounts.get(tag) || 0) + 1);
-              }
-            });
+      cacheRequest.onsuccess = () => {
+        cacheData = cacheRequest.result;
+
+        // Wait for count to be ready, then check cache validity
+        transaction.oncomplete = () => {
+          // If cache is valid (count matches), return cached data
+          if (cacheData && cacheData.count === currentCount && cacheData.hashtags) {
+            db.close();
+            resolve(cacheData.hashtags);
+            return;
           }
-          cursor.continue();
-        } else {
-          // Convert to array and sort by count
-          const hashtags = Array.from(hashtagCounts.entries())
-            .map(([tag, count]) => ({ tag, count }))
-            .sort((a, b) => b.count - a.count);
 
-          db.close();
-          resolve(hashtags);
-        }
+          // Cache miss or stale - recalculate
+          recalculateHashtags();
+        };
       };
 
-      cursorRequest.onerror = () => {
-        db.close();
-        reject(cursorRequest.error || new Error('Cursor error'));
+      cacheRequest.onerror = () => {
+        // On error, just recalculate
+        transaction.oncomplete = () => {
+          recalculateHashtags();
+        };
       };
 
       transaction.onerror = () => {
         db.close();
         reject(transaction.error || new Error('Transaction error'));
       };
+
+      async function recalculateHashtags() {
+        let recalcDb;
+        try {
+          recalcDb = await openDB();
+          const recalcTransaction = recalcDb.transaction([STORE_POSTS, STORE_METADATA], 'readwrite');
+          const recalcStore = recalcTransaction.objectStore(STORE_POSTS);
+          const recalcMetaStore = recalcTransaction.objectStore(STORE_METADATA);
+
+          const hashtagCounts = new Map();
+          const cursorRequest = recalcStore.openCursor();
+
+          // Helper to extract hashtags from text
+          const extractHashtags = (text) => {
+            if (!text || typeof text !== 'string') return [];
+            const hashtagRegex = /#[\w]+/g;
+            const matches = text.match(hashtagRegex);
+            return matches ? matches.map(tag => tag.toLowerCase()) : [];
+          };
+
+          cursorRequest.onsuccess = (event) => {
+            const cursor = event.target.result;
+            if (cursor) {
+              const post = cursor.value;
+              if (post && post.title) {
+                const caption = post.title || '';
+                extractHashtags(caption).forEach(tag => {
+                  if (tag) {
+                    hashtagCounts.set(tag, (hashtagCounts.get(tag) || 0) + 1);
+                  }
+                });
+              }
+              cursor.continue();
+            } else {
+              // Convert to array and sort by count
+              const hashtags = Array.from(hashtagCounts.entries())
+                .map(([tag, count]) => ({ tag, count }))
+                .sort((a, b) => b.count - a.count);
+
+              // Store in cache
+              recalcMetaStore.put({ count: currentCount, hashtags }, 'hashtags_cache');
+
+              recalcTransaction.oncomplete = () => {
+                recalcDb.close();
+                resolve(hashtags);
+              };
+            }
+          };
+
+          cursorRequest.onerror = () => {
+            recalcDb.close();
+            reject(cursorRequest.error || new Error('Cursor error'));
+          };
+
+          recalcTransaction.onerror = () => {
+            recalcDb.close();
+            reject(recalcTransaction.error || new Error('Transaction error'));
+          };
+        } catch (error) {
+          if (recalcDb) recalcDb.close();
+          reject(error);
+        }
+      }
     });
   } catch (error) {
     if (db) db.close();
@@ -1829,7 +1950,7 @@ function extractCarouselVideo(carouselIndex) {
         if (carouselVideos) {
           return { videoUrl: carouselVideos };
         }
-      } catch (e) {}
+      } catch (e) { }
     }
 
     // Return the video at the specified index if available
@@ -1946,7 +2067,7 @@ function extractFullResImage() {
         if (imageUrl) {
           return { imageUrl };
         }
-      } catch (e) {}
+      } catch (e) { }
     }
 
     if (bestImage) {
@@ -2049,7 +2170,7 @@ function extractFromRenderedPage() {
     }
 
     const usernameEl = document.querySelector('header a[href*="/"]') ||
-                       document.querySelector('a[href*="/"][role="link"]');
+      document.querySelector('a[href*="/"][role="link"]');
     if (usernameEl) {
       const href = usernameEl.getAttribute('href');
       if (href) {
@@ -2059,7 +2180,7 @@ function extractFromRenderedPage() {
     }
 
     const captionEl = document.querySelector('article span') ||
-                      document.querySelector('[data-testid]');
+      document.querySelector('[data-testid]');
     if (captionEl) {
       caption = captionEl.textContent || '';
     }
@@ -2092,13 +2213,13 @@ function extractFromRenderedPage() {
     if (!videoUrl && window.__additionalDataLoaded) {
       try {
         videoUrl = findVideoUrl(window.__additionalDataLoaded);
-      } catch (e) {}
+      } catch (e) { }
     }
 
     if (!videoUrl && window._sharedData) {
       try {
         videoUrl = findVideoUrl(window._sharedData);
-      } catch (e) {}
+      } catch (e) { }
     }
 
     const scripts = document.querySelectorAll('script');
@@ -2115,7 +2236,7 @@ function extractFromRenderedPage() {
                   videoUrl = found;
                   continue;
                 }
-              } catch (e) {}
+              } catch (e) { }
             }
 
             if (!videoUrl && text.includes('video_versions')) {
@@ -2149,7 +2270,7 @@ function extractFromRenderedPage() {
                 }
               }
             }
-          } catch (e) {}
+          } catch (e) { }
         }
       }
     }
