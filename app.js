@@ -153,6 +153,8 @@ function initializeEventListeners() {
   document.getElementById('modal').addEventListener('click', (e) => {
     if (e.target.id === 'modal') closeModal();
   });
+  document.getElementById('modal-prev').addEventListener('click', () => navigateModal(-1));
+  document.getElementById('modal-next').addEventListener('click', () => navigateModal(1));
 
   // Keyboard navigation
   document.addEventListener('keydown', (e) => {
@@ -866,7 +868,7 @@ function loadCarouselSlide(idx, post) {
 
         // Auto-play if this is the current slide
         if (idx === currentCarouselIndex) {
-          video.play().catch(() => {});
+          video.play().catch(() => { });
         }
       } else {
         // Fallback: show image thumbnail
@@ -964,7 +966,7 @@ function goToCarouselSlide(idx, post) {
   if (newSlide) {
     const video = newSlide.querySelector('video');
     if (video) {
-      video.play().catch(() => {});
+      video.play().catch(() => { });
     }
   }
 }
@@ -994,7 +996,7 @@ function renderVideoModal(post, container) {
     }
 
     if (response && response.success && response.videoUrl) {
-      const video = createVideoElement(response.videoUrl, true);
+      const video = createVideoElement(response.videoUrl);
       video.controls = true;
       video.autoplay = true;
       video.className = 'modal-video';
@@ -1015,7 +1017,7 @@ function renderVideoModal(post, container) {
       });
 
       video.addEventListener('loadeddata', () => {
-        video.play().catch(() => {});
+        video.play().catch(() => { });
       });
     } else {
       container.innerHTML = `<p class="error-message">Failed to load video: ${response?.error || 'Unknown error'}</p>`;
@@ -1497,7 +1499,7 @@ function showError(message) {
     <div class="empty-state">
       <div class="empty-icon">📭</div>
       <p>${message}</p>
-      <button class="sync-btn-inline" onclick="openSyncPanel()">
+      <button class="sync-btn-inline" id="error-sync-btn">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" width="18" height="18">
           <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0118.8-4.3M22 12.5a10 10 0 01-18.8 4.3" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
@@ -1505,4 +1507,9 @@ function showError(message) {
       </button>
     </div>
   `;
+  // Attach event listener after DOM insertion
+  const syncBtn = document.getElementById('error-sync-btn');
+  if (syncBtn) {
+    syncBtn.addEventListener('click', openSyncPanel);
+  }
 }

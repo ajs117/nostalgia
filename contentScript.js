@@ -1334,7 +1334,6 @@ function updateSyncProgress(synced, failed, total = 0) {
   if (progressElement) {
     const processed = synced + failed;
     if (total > 0) {
-      Math.min(100, Math.round((processed / total) * 100));
       progressElement.innerHTML = `
         <span class="pulse-dot" style="width: 8px; height: 8px; background: #2ed573; border-radius: 50%; animation: pulse 1.5s infinite;"></span>
         <span style="opacity: 0.6; margin-left: auto;">${processed} / ${total}</span>

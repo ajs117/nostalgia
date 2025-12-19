@@ -10,12 +10,23 @@
    "background": {
       "service_worker": "background.js"
    },
-   "content_scripts": [ {
-      "js": [ "contentScript.js" ],
-      "matches": [ "https://www.instagram.com/*" ]
-   } ],
+   "content_scripts": [
+      {
+         "js": [
+            "contentScript.js"
+         ],
+         "matches": [
+            "https://www.instagram.com/*"
+         ]
+      }
+   ],
    "description": "Sync and organize your Instagram saved posts.",
-   "host_permissions": [ "https://*.instagram.com/*", "https://i.instagram.com/*", "https://*.fbcdn.net/*", "https://*.cdninstagram.com/*" ],
+   "host_permissions": [
+      "https://*.instagram.com/*",
+      "https://i.instagram.com/*",
+      "https://*.fbcdn.net/*",
+      "https://*.cdninstagram.com/*"
+   ],
    "icons": {
       "128": "logo128.png",
       "16": "logo16.png",
@@ -25,10 +36,20 @@
    },
    "manifest_version": 3,
    "name": "nostalgia",
-   "permissions": [ "storage", "scripting", "tabs" ],
-   "version": "1.5",
-   "web_accessible_resources": [ {
-      "matches": [ "\u003Call_urls>" ],
-      "resources": [ "index.html" ]
-   } ]
+   "permissions": [
+      "storage",
+      "scripting",
+      "tabs"
+   ],
+   "version": "1.6",
+   "web_accessible_resources": [
+      {
+         "matches": [
+            "\u003Call_urls>"
+         ],
+         "resources": [
+            "index.html"
+         ]
+      }
+   ]
 }
