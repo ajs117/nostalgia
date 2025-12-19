@@ -1,44 +1,47 @@
 /* Modern Instagram-inspired Design System */
 :root {
-  /* Colors - Dark theme with Instagram accent */
+  /* Colors - Official Instagram Dark Theme */
   --bg-primary: #000000;
-  --bg-secondary: #0a0a0a;
-  --bg-tertiary: #141414;
-  --bg-card: #1c1c1e;
-  --bg-hover: #2a2a2e;
+  --bg-secondary: #000000;
+  --bg-tertiary: #121212;
+  --bg-card: #121212;
+  --bg-hover: #1a1a1a;
 
-  --text-primary: #fafafa;
+  --text-primary: #f5f5f5;
   --text-secondary: #a8a8a8;
   --text-tertiary: #737373;
 
-  --border: #2a2a2e;
-  --border-light: #3a3a3e;
+  --border: #262626;
+  --border-light: #363636;
 
-  /* Reversed Instagram gradient - blue → purple → pink → orange → yellow */
-  --gradient-instagram: linear-gradient(45deg, #405de6 0%, #833ab4 25%, #c13584 50%, #e1306c 75%, #fd1d1d 100%);
-  --gradient-instagram-vertical: linear-gradient(180deg, #405de6 0%, #833ab4 25%, #c13584 50%, #e1306c 75%, #fd1d1d 100%);
+  /* Official Instagram Brand Gradient */
+  --gradient-instagram: linear-gradient(45deg, #405de6 0%, #5851db 10%, #833ab4 20%, #c13584 35%, #e1306c 50%, #fd1d1d 65%, #f56040 80%, #f77737 90%, #fcaf45 100%);
+  --gradient-instagram-vertical: linear-gradient(180deg, #405de6 0%, #5851db 10%, #833ab4 20%, #c13584 35%, #e1306c 50%, #fd1d1d 65%, #f56040 80%, #f77737 90%, #fcaf45 100%);
   --gradient-pink-purple: linear-gradient(135deg, #833ab4 0%, #c13584 100%);
-  --gradient-warm: linear-gradient(135deg, #405de6 0%, #833ab4 50%, #c13584 100%);
-  --gradient-glow: linear-gradient(135deg, rgba(64, 93, 230, 0.3) 0%, rgba(131, 58, 180, 0.3) 50%, rgba(193, 53, 132, 0.3) 100%);
+  --gradient-warm: linear-gradient(135deg, #833ab4 0%, #fd1d1d 50%, #f77737 100%);
+  --gradient-glow: linear-gradient(135deg, rgba(64, 93, 230, 0.25) 0%, rgba(193, 53, 132, 0.25) 50%, rgba(253, 29, 29, 0.25) 100%);
 
-  /* Accent colors - Instagram palette */
-  --accent-primary: #c13584;
-  --accent-hover: #a02d70;
-  --accent-pink: #c13584;
+  /* Accent colors - Official Palette */
+  --accent-primary: #0095f6;
+  /* Instagram's signature blue for primary actions */
+  --accent-secondary: #e1306c;
+  /* Brand pink */
+  --accent-hover: #1877f2;
+  --accent-pink: #e1306c;
   --accent-purple: #833ab4;
   --accent-blue: #405de6;
-  --accent-orange: #fd1d1d;
+  --accent-orange: #f56040;
   --accent-yellow: #fcaf45;
   --success: #00d26a;
   --error: #ff3b5c;
   --warning: #ffb800;
 
   /* Enhanced Shadows with glow */
-  --shadow-sm: 0 2px 4px rgba(0, 0, 0, 0.3);
-  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.4);
-  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.5);
-  --shadow-glow: 0 0 24px rgba(193, 53, 132, 0.35);
-  --shadow-glow-subtle: 0 0 16px rgba(131, 58, 180, 0.2);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 12px 24px rgba(0, 0, 0, 0.6);
+  --shadow-glow: 0 0 20px rgba(193, 53, 132, 0.25);
+  --shadow-glow-subtle: 0 0 12px rgba(131, 58, 180, 0.15);
 
   /* Transitions */
   --transition-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
@@ -47,13 +50,13 @@
   --transition-bounce: 500ms cubic-bezier(0.34, 1.56, 0.64, 1);
 
   /* Border radius */
-  --radius-sm: 8px;
-  --radius-md: 12px;
-  --radius-lg: 18px;
-  --radius-xl: 24px;
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
 
   /* Sidebar */
-  --sidebar-width: 280px;
+  --sidebar-width: 250px;
 }
 
 /* Reset & Base */
@@ -247,7 +250,7 @@ body {
   padding: 12px 14px;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  background: var(--bg-tertiary);
+  background: #121212;
   color: var(--text-primary);
   font-size: 14px;
   transition: var(--transition-fast);
@@ -283,7 +286,7 @@ select {
   padding: 10px 32px 10px 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  background: var(--bg-tertiary);
+  background: #121212;
   color: var(--text-primary);
   font-size: 14px;
   cursor: pointer;
