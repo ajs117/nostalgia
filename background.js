@@ -212,18 +212,22 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true; // Keep message channel open for async response
   }
 
-  if (request.action === 'GET_POSTS_INFO') {
-    // Get count and check if specific IDs exist
-    getPostsMetadata().then((metadata) => {
-      sendResponse({
-        count: metadata.count,
-        ids: metadata.ids,
-        links: metadata.links
+
+
+  if (request.action === 'CHECK_POSTS_BATCH_EXISTS') {
+    // Check multiple posts for existence at once
+    const postIds = request.postIds || [];
+    const links = request.links || [];
+
+    // Process all checks and return results
+    Promise.all(postIds.map((id, index) => checkPostExists(id, links[index])))
+      .then((results) => {
+        sendResponse({ results });
+      })
+      .catch((error) => {
+        console.error('Error in batch existence check:', error);
+        sendResponse({ results: postIds.map(() => false) });
       });
-    }).catch((error) => {
-      console.error('Error getting posts info:', error);
-      sendResponse({ count: 0, ids: [], links: [] });
-    });
     return true;
   }
 
@@ -1178,49 +1182,7 @@ async function countPostsDirectly() {
   }
 }
 
-// Get posts metadata (IDs and links for duplicate checking)
-async function getPostsMetadata() {
-  let db;
-  try {
-    db = await openDB();
-    return new Promise((resolve) => {
-      const transaction = db.transaction([STORE_POSTS_INDEX, STORE_METADATA], 'readonly');
-      const indexStore = transaction.objectStore(STORE_POSTS_INDEX);
-      const metaStore = transaction.objectStore(STORE_METADATA);
 
-      let count = 0;
-      let ids = [];
-      let links = [];
-
-      const countRequest = metaStore.get('posts_count');
-      countRequest.onsuccess = () => {
-        count = countRequest.result || 0;
-      };
-
-      const idsRequest = indexStore.get('post_ids');
-      idsRequest.onsuccess = () => {
-        ids = idsRequest.result || [];
-      };
-
-      const linksRequest = indexStore.get('post_links');
-      linksRequest.onsuccess = () => {
-        links = linksRequest.result || [];
-      };
-
-      transaction.oncomplete = () => {
-        db.close();
-        resolve({ count, ids, links });
-      };
-      transaction.onerror = () => {
-        db.close();
-        resolve({ count: 0, ids: [], links: [] });
-      };
-    });
-  } catch (error) {
-    if (db) db.close();
-    return { count: 0, ids: [], links: [] };
-  }
-}
 
 // Check if a post exists using direct store lookups
 async function checkPostExists(postId, link) {

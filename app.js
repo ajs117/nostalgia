@@ -848,8 +848,7 @@ function loadCarouselSlide(idx, post) {
       carouselIndex: idx
     }, (response) => {
       if (response && response.success && response.videoUrl) {
-        const video = document.createElement('video');
-        video.src = response.videoUrl;
+        const video = createVideoElement(response.videoUrl);
         video.controls = true;
         video.className = 'modal-video';
         video.crossOrigin = 'anonymous';

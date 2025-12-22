@@ -1009,26 +1009,22 @@ async function getInstagramSavedPosts() {
       });
     });
 
-    // Get existing post info for duplicate checking
-    const existingPostsInfo = await new Promise((resolve) => {
-      chrome.runtime.sendMessage({ action: 'GET_POSTS_INFO' }, (response) => {
+    // Get current posts count for progress tracking
+    const postsCount = await new Promise((resolve) => {
+      chrome.runtime.sendMessage({ action: 'GET_POSTS_COUNT' }, (response) => {
         if (chrome.runtime.lastError) {
-          resolve({ count: 0, ids: [], links: [] });
+          resolve(0);
         } else {
-          resolve(response || { count: 0, ids: [], links: [] });
+          resolve(response.count || 0);
         }
       });
     });
 
-    // Use Sets for O(1) lookup
-    const existingPostIds = new Set(existingPostsInfo.ids || []);
-    const existingPostLinks = new Set(existingPostsInfo.links || []);
-
     if (savedProgress) {
       syncedCount = savedProgress.synced || 0;
       failedCount = savedProgress.failed || 0;
-    } else if (existingPostsInfo.count > 0) {
-      syncedCount = existingPostsInfo.count;
+    } else if (postsCount > 0) {
+      syncedCount = postsCount;
       failedCount = 0;
     } else {
       syncedCount = 0;
@@ -1082,12 +1078,21 @@ async function getInstagramSavedPosts() {
           // Estimate total for progress (using savedPosts.items.length directly)
         }
 
-        // Skip posts that already exist
-        const newPostsInBatch = savedPosts.items.filter(post => {
-          const postId = post.id || `${post.user?.username}-${post.code}`;
-          const postUrl = `https://www.instagram.com/p/${post.code}/`;
-          return !existingPostIds.has(postId) && !existingPostLinks.has(postUrl);
+        // Skip posts that already exist using efficient batch check
+        const postIdsToCheck = savedPosts.items.map(p => p.id || `${p.user?.username}-${p.code}`);
+        const linksToCheck = savedPosts.items.map(p => `https://www.instagram.com/p/${p.code}/`);
+
+        const existenceResults = await new Promise((resolve) => {
+          chrome.runtime.sendMessage({
+            action: 'CHECK_POSTS_BATCH_EXISTS',
+            postIds: postIdsToCheck,
+            links: linksToCheck
+          }, (response) => {
+            resolve(response?.results || postIdsToCheck.map(() => false));
+          });
         });
+
+        const newPostsInBatch = savedPosts.items.filter((post, index) => !existenceResults[index]);
 
         // Check if we've caught up with existing posts
         if (checkingNewPosts && savedMinId && savedPosts.items.length > 0) {
@@ -1125,9 +1130,6 @@ async function getInstagramSavedPosts() {
                 if (result.status === 'fulfilled') {
                   const element = result.value;
                   batchBuffer.push(element);
-
-                  existingPostIds.add(element.id);
-                  existingPostLinks.add(element.url);
 
                   syncedCount = await saveBatchIfFull(batchBuffer, syncedCount, failedCount, currentMinId, savedMinId, savedMaxId, maxId, totalSavedCount);
 
@@ -1197,10 +1199,6 @@ async function getInstagramSavedPosts() {
               if (result.status === 'fulfilled') {
                 const element = result.value;
                 batchBuffer.push(element);
-
-                // Add to our local tracking
-                existingPostIds.add(element.id);
-                existingPostLinks.add(element.url);
 
                 syncedCount = await saveBatchIfFull(batchBuffer, syncedCount, failedCount, currentMinId, savedMinId, savedMaxId, maxId, totalSavedCount);
 
