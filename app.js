@@ -31,10 +31,35 @@ function createVideoElement(src) {
   const video = document.createElement('video');
   video.src = src;
   video.preload = 'metadata';
-  video.muted = true;
+
+  // Restore volume preference
+  const savedVolume = localStorage.getItem('video_volume');
+  const savedMuted = localStorage.getItem('video_muted');
+
+  if (savedVolume !== null) {
+    video.volume = parseFloat(savedVolume);
+  } else {
+    video.volume = 1.0;
+  }
+
+  if (savedMuted !== null) {
+    video.muted = savedMuted === 'true';
+  } else {
+    video.muted = true; // Default to muted for auto-play policy compatibility
+  }
+
   video.style.width = '100%';
   video.style.height = '100%';
   video.style.objectFit = 'cover';
+
+  // Save volume preference
+  const saveVolumeState = () => {
+    localStorage.setItem('video_volume', video.volume);
+    localStorage.setItem('video_muted', video.muted);
+  };
+
+  video.addEventListener('volumechange', saveVolumeState);
+
   video.onerror = () => {
     console.error('Video playback error:', src);
     video.parentElement.innerHTML = '<div class="media-error">Video failed to load</div>';
@@ -767,8 +792,9 @@ function renderCarouselModal(post, container, startIndex = 0) {
     slide.dataset.index = idx;
 
     if (item.isVideo) {
+      const bgStyle = item.imageUrl ? `style="background-image: url('${item.imageUrl}')"` : '';
       slide.innerHTML = `
-        <div class="loading-video">
+        <div class="loading-video" ${bgStyle}>
           <div class="spinner"></div>
           <p>Loading video...</p>
         </div>
@@ -972,8 +998,11 @@ function goToCarouselSlide(idx, post) {
 
 // Render single video in modal
 function renderVideoModal(post, container) {
+  const imgSrc = post.image || post.thumbnail;
+  const bgStyle = imgSrc ? `style="background-image: url('${imgSrc}')"` : '';
+
   container.innerHTML = `
-    <div class="loading-video">
+    <div class="loading-video" ${bgStyle}>
       <div class="spinner"></div>
       <p>Loading video...</p>
     </div>
