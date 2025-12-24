@@ -967,7 +967,10 @@ select:hover {
 }
 
 #modal-link {
-  display: flex;
+  display:flex;align-items:center;justify-content:center;gap:8px;width:100%;padding:12px;color:white;text-decoration:none;border-radius:var(--radius-md);font-size:14px;font-weight:600;transition:var(--transition-fast);
+  /* Use the brand gradient for prominent CTA to match header and other actions */
+  background: var(--gradient-pink-purple);
+  box-shadow: var(--shadow-glow-subtle);
   align-items: center;
   justify-content: center;
   gap: 8px;
@@ -983,7 +986,9 @@ select:hover {
 }
 
 #modal-link:hover {
-  background: var(--accent-hover);
+  /* Use theme gradient on hover instead of the blue accent */
+  background: linear-gradient(135deg, rgba(131,58,180,0.95) 0%, rgba(193,53,132,0.95) 100%);
+  transform: translateY(-1px);
 }
 
 /* Modal Navigation */
@@ -1084,10 +1089,13 @@ select:hover {
 .spinner {
   width: 40px;
   height: 40px;
-  border: 3px solid var(--border);
-  border-top-color: var(--accent-primary);
+  /* Make the spinner visible on dark backgrounds and match accent */
+  border: 3px solid rgba(255,255,255,0.06);
+  /* Use purple accent for spinner head to match theme (avoid blue) */
+  border-top-color: var(--accent-purple);
   border-radius: 50%;
   animation: spin 1s linear infinite;
+  box-shadow: 0 0 10px rgba(0,0,0,0.4), 0 0 6px rgba(0,0,0,0.25) inset;
 }
 
 @keyframes spin {
