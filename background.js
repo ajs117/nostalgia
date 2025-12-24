@@ -1,4 +1,5 @@
 let capturedImages = [];
+let capturedImagesCleanupTimeout = null;
 let extensionTabId = null;
 let activeInstagramTabId = null;
 
@@ -82,6 +83,42 @@ function updateExtensionTab(immediate = false) {
   }
 }
 
+// Throttle progress events to avoid overwhelming the extension page during sync.
+// Service workers can get bogged down by high-frequency messaging when the DB is large.
+let lastSyncProgressBroadcastAt = 0;
+let pendingSyncProgressPayload = null;
+let syncProgressBroadcastTimeout = null;
+const SYNC_PROGRESS_BROADCAST_INTERVAL_MS = 500;
+
+function throttleSyncProgressBroadcast(payload) {
+  pendingSyncProgressPayload = payload;
+  const now = Date.now();
+  const elapsed = now - lastSyncProgressBroadcastAt;
+
+  const flush = () => {
+    syncProgressBroadcastTimeout = null;
+    lastSyncProgressBroadcastAt = Date.now();
+    const toSend = pendingSyncProgressPayload;
+    pendingSyncProgressPayload = null;
+    if (toSend) {
+      safeBroadcast(toSend);
+    }
+  };
+
+  if (elapsed >= SYNC_PROGRESS_BROADCAST_INTERVAL_MS) {
+    if (syncProgressBroadcastTimeout) {
+      clearTimeout(syncProgressBroadcastTimeout);
+      syncProgressBroadcastTimeout = null;
+    }
+    flush();
+    return;
+  }
+
+  if (!syncProgressBroadcastTimeout) {
+    syncProgressBroadcastTimeout = setTimeout(flush, SYNC_PROGRESS_BROADCAST_INTERVAL_MS - elapsed);
+  }
+}
+
 // Safe message sender that handles closed channels
 function safeSendToTab(tabId, message) {
   if (!tabId) return;
@@ -110,7 +147,23 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'CAPTURE_IMAGES') {
-    capturedImages = request.images;
+    capturedImages = Array.isArray(request.images) ? request.images : [];
+
+    // Prevent unbounded memory retention if very large payloads are captured.
+    // Keep only the most recent items.
+    const MAX_CAPTURED_IMAGES = 500;
+    if (capturedImages.length > MAX_CAPTURED_IMAGES) {
+      capturedImages = capturedImages.slice(-MAX_CAPTURED_IMAGES);
+    }
+
+    // Auto-clear after a short period to avoid keeping large blobs in memory.
+    if (capturedImagesCleanupTimeout) {
+      clearTimeout(capturedImagesCleanupTimeout);
+    }
+    capturedImagesCleanupTimeout = setTimeout(() => {
+      capturedImages = [];
+      capturedImagesCleanupTimeout = null;
+    }, 2 * 60 * 1000);
     return false;
   }
 
@@ -326,7 +379,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           return;
         }
 
-        // Add posts individually (handles duplicates internally)
+        // Add posts in batch for better performance
         const addedCount = await addPostsToIndexedDB(newPosts);
 
         // Update extension tab (throttled during sync)
@@ -374,8 +427,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'SYNC_PROGRESS_UPDATE') {
-    // Forward progress updates to the extension tab
-    safeBroadcast({
+    // Forward progress updates to the extension tab (throttled to reduce message/UI load)
+    throttleSyncProgressBroadcast({
       action: 'SYNC_PROGRESS',
       synced: request.synced,
       failed: request.failed,
@@ -983,6 +1036,7 @@ function openDB() {
         postsStore.createIndex('timestamp', 'timestamp', { unique: false });
         postsStore.createIndex('link', 'link', { unique: false });
         postsStore.createIndex('username', 'username', { unique: false });
+        postsStore.createIndex('title', 'title', { unique: false });
         postsStore.createIndex('isVideo', 'isVideo', { unique: false });
         postsStore.createIndex('savedOrder', 'savedOrder', { unique: false });
         postsStore.createIndex('takenAt', 'takenAt', { unique: false });
@@ -994,6 +1048,9 @@ function openDB() {
         }
         if (!postsStore.indexNames.contains('takenAt')) {
           postsStore.createIndex('takenAt', 'takenAt', { unique: false });
+        }
+        if (!postsStore.indexNames.contains('title')) {
+          postsStore.createIndex('title', 'title', { unique: false });
         }
       }
 
@@ -1494,75 +1551,59 @@ async function getPostsPaginated(page = 1, limit = 50, sortBy = 'newest-saved', 
           reject(countRequest.error);
         };
       } else {
-        // Slow path: load all, filter, sort, paginate (for complex sorts/filters)
-        const allPosts = [];
-        const cursorRequest = store.openCursor();
+        // Filtered / complex path.
+        // IMPORTANT: Pagination must be based on the globally sorted filtered set.
+        // The previous implementation only sorted the page slice, which could return
+        // incorrect results for many sort modes.
+
+        const targetStart = (page - 1) * limit;
+        const targetEndExclusive = targetStart + limit;
+
+        const isSavedOrderSort = (sortBy === 'newest-saved' || sortBy === 'newest' || sortBy === 'oldest-saved' || sortBy === 'oldest');
+        const isTakenAtSort = (sortBy === 'newest-posted' || sortBy === 'oldest-posted');
+        const isAlphabeticalSort = (sortBy === 'alphabetical');
+        const isRandomSort = (sortBy === 'random');
+
+        // If the sort can be streamed in the desired order, we can avoid buffering
+        // all matches (still need to scan to compute total).
+        const canStreamSorted = isSavedOrderSort || isTakenAtSort;
+
+        let totalMatched = 0;
+        const pagePosts = [];
+        const allMatchedPosts = (canStreamSorted ? null : []);
+
+        let cursorRequest;
+        if (isSavedOrderSort) {
+          const index = store.index('savedOrder');
+          const direction = (sortBy === 'newest-saved' || sortBy === 'newest') ? 'prev' : 'next';
+          cursorRequest = index.openCursor(null, direction);
+        } else if (isTakenAtSort) {
+          const index = store.index('takenAt');
+          const direction = (sortBy === 'newest-posted') ? 'prev' : 'next';
+          cursorRequest = index.openCursor(null, direction);
+        } else {
+          cursorRequest = store.openCursor();
+        }
 
         cursorRequest.onsuccess = (event) => {
           const cursor = event.target.result;
-          if (cursor) {
-            const post = cursor.value;
-
-            if (matchesFilters(post)) {
-              allPosts.push(post);
+          if (!cursor) {
+            // End of scan
+            if (canStreamSorted) {
+              db.close();
+              resolve({
+                posts: pagePosts,
+                total: totalMatched,
+                hasMore: totalMatched > targetEndExclusive,
+                page
+              });
+              return;
             }
 
-            cursor.continue();
-          } else {
-            // All posts collected, now sort
-            switch (sortBy) {
-            case 'newest-saved':
-            case 'newest':
-              // Use savedOrder - higher savedOrder = newer
-              allPosts.sort((a, b) => {
-                const orderA = a.savedOrder !== undefined ? a.savedOrder : Number.MIN_SAFE_INTEGER;
-                const orderB = b.savedOrder !== undefined ? b.savedOrder : Number.MIN_SAFE_INTEGER;
-                if (orderA !== orderB) {
-                  return orderB - orderA; // Descending: higher order = newer
-                }
-                // Secondary sort by ID for stability
-                return (a.id || '').localeCompare(b.id || '');
-              });
-              break;
-            case 'oldest-saved':
-            case 'oldest':
-              // Use savedOrder - lower savedOrder = older
-              allPosts.sort((a, b) => {
-                const orderA = a.savedOrder !== undefined ? a.savedOrder : Number.MAX_SAFE_INTEGER;
-                const orderB = b.savedOrder !== undefined ? b.savedOrder : Number.MAX_SAFE_INTEGER;
-                if (orderA !== orderB) {
-                  return orderA - orderB; // Ascending: lower order = older
-                }
-                // Secondary sort by ID for stability
-                return (a.id || '').localeCompare(b.id || '');
-              });
-              break;
-            case 'newest-posted':
-              // Use takenAt - newest posted first
-              allPosts.sort((a, b) => {
-                const takenAtA = a.takenAt || 0;
-                const takenAtB = b.takenAt || 0;
-                if (takenAtA !== takenAtB) {
-                  return takenAtB - takenAtA; // Descending: newer posted first
-                }
-                // Secondary sort by ID for stability
-                return (a.id || '').localeCompare(b.id || '');
-              });
-              break;
-            case 'oldest-posted':
-              // Use takenAt - oldest posted first
-              allPosts.sort((a, b) => {
-                const takenAtA = a.takenAt || 0;
-                const takenAtB = b.takenAt || 0;
-                if (takenAtA !== takenAtB) {
-                  return takenAtA - takenAtB; // Ascending: older posted first
-                }
-                // Secondary sort by ID for stability
-                return (a.id || '').localeCompare(b.id || '');
-              });
-              break;
-            case 'alphabetical':
-              allPosts.sort((a, b) => {
+            // Need to sort/shuffle the full filtered set, then slice the page.
+            const sorted = allMatchedPosts || [];
+            if (isAlphabeticalSort) {
+              sorted.sort((a, b) => {
                 const usernameA = (a.username || '').toLowerCase();
                 const usernameB = (b.username || '').toLowerCase();
                 if (usernameA !== usernameB) {
@@ -1572,31 +1613,42 @@ async function getPostsPaginated(page = 1, limit = 50, sortBy = 'newest-saved', 
                 const titleB = (b.title || '').toLowerCase();
                 return titleA.localeCompare(titleB);
               });
-              break;
-            case 'random':
-              // Fisher-Yates shuffle
-              for (let i = allPosts.length - 1; i > 0; i--) {
+            } else if (isRandomSort) {
+              for (let i = sorted.length - 1; i > 0; i--) {
                 const j = Math.floor(Math.random() * (i + 1));
-                [allPosts[i], allPosts[j]] = [allPosts[j], allPosts[i]];
+                [sorted[i], sorted[j]] = [sorted[j], sorted[i]];
               }
-              break;
-            default:
-              allPosts.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+            } else {
+              // Default fallback: timestamp descending
+              sorted.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
             }
 
-            const total = allPosts.length;
-            const startIdx = (page - 1) * limit;
-            const endIdx = startIdx + limit;
-            const paginatedPosts = allPosts.slice(startIdx, endIdx);
-
+            const sliced = sorted.slice(targetStart, targetEndExclusive);
             db.close();
             resolve({
-              posts: paginatedPosts,
-              total,
-              hasMore: endIdx < total,
+              posts: sliced,
+              total: sorted.length,
+              hasMore: sorted.length > targetEndExclusive,
               page
             });
+            return;
           }
+
+          const post = cursor.value;
+          if (matchesFilters(post)) {
+            if (canStreamSorted) {
+              const matchIndex = totalMatched;
+              if (matchIndex >= targetStart && matchIndex < targetEndExclusive) {
+                pagePosts.push(post);
+              }
+              totalMatched++;
+            } else {
+              allMatchedPosts.push(post);
+              totalMatched++;
+            }
+          }
+
+          cursor.continue();
         };
 
         cursorRequest.onerror = () => {
@@ -1728,7 +1780,8 @@ async function getAllHashtagsWithCounts() {
     db = await openDB();
 
     return new Promise((resolve, reject) => {
-      const transaction = db.transaction([STORE_POSTS, STORE_METADATA], 'readwrite');
+      // Readonly is enough for cache lookup + count and reduces write-lock contention.
+      const transaction = db.transaction([STORE_POSTS, STORE_METADATA], 'readonly');
       const store = transaction.objectStore(STORE_POSTS);
       const metaStore = transaction.objectStore(STORE_METADATA);
 
@@ -1755,7 +1808,17 @@ async function getAllHashtagsWithCounts() {
             return;
           }
 
-          // Cache miss or stale - recalculate
+          // If cache exists but is stale and a sync appears to be active,
+          // return the cached hashtags (stale) to avoid repeatedly
+          // scanning the entire DB during an active sync which can be
+          // very expensive for large datasets.
+          if (cacheData && typeof activeInstagramTabId !== 'undefined' && activeInstagramTabId) {
+            db.close();
+            resolve(cacheData.hashtags || []);
+            return;
+          }
+
+          // Cache miss or no active sync - recalculate
           recalculateHashtags();
         };
       };

@@ -1,10 +1,10 @@
 {
   "name": "nostalgia",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "description": "nostalgia - Your Instagram saved posts viewer",
   "scripts": {
     "build": "node build.js",
-    "package": "node build.js && cd dist && powershell -ExecutionPolicy Bypass -Command \"Compress-Archive -Path * -DestinationPath ../nostalgia-v1.7.zip -Force\"",
+    "package": "node build.js && cd dist && powershell -ExecutionPolicy Bypass -Command \"Compress-Archive -Path * -DestinationPath ../nostalgia-v1.8.zip -Force\"",
     "resize-screenshots": "node resize_screenshots.js",
     "lint": "eslint \"*.js\" \"**/*.js\" --ignore-pattern \"node_modules/**\" --ignore-pattern \"dist/**\"",
     "lint:fix": "eslint --fix \"*.js\" \"**/*.js\" --ignore-pattern \"node_modules/**\" --ignore-pattern \"dist/**\"",

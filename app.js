@@ -12,6 +12,7 @@ let currentCarouselIndex = 0; // Track which item in a carousel is being viewed
 let isLoading = false;
 let totalPosts = 0;
 let isSyncing = false;
+let lastKnownSyncTotal = 0;
 
 // Debounce helper
 function debounce(func, wait) {
@@ -25,6 +26,15 @@ function debounce(func, wait) {
     timeout = setTimeout(later, wait);
   };
 }
+
+// Debounced hashtag fetch to avoid repeated expensive requests during sync
+const scheduleFetchAllHashtags = debounce(() => {
+  try {
+    fetchAllHashtags();
+  } catch (e) {
+    console.error('Error scheduling hashtag fetch:', e);
+  }
+}, 1000);
 
 // Helper functions for creating media elements
 function createVideoElement(src) {
@@ -262,10 +272,10 @@ function loadPosts(append = false, fetchHashtagsAfter = false) {
 
       // Fetch hashtags after posts are loaded (service worker is ready)
       if (fetchHashtagsAfter) {
-        fetchAllHashtags();
+        scheduleFetchAllHashtags();
       } else if (allHashtagsCache.length === 0) {
         // If hashtags cache is empty, try to fetch from database
-        fetchAllHashtags();
+        scheduleFetchAllHashtags();
       }
     } else {
       showError('No posts found. Click "Sync Posts" to import your Instagram saved posts.');
@@ -313,7 +323,7 @@ function setupMessageListener() {
     if (request.action === 'UPDATE_ITEMS') {
       // Don't reset page during sync - preserve user's current page position
       loadPosts();
-      fetchAllHashtags(); // Refresh hashtags when posts are updated
+      scheduleFetchAllHashtags(); // Refresh hashtags when posts are updated (debounced)
     } else if (request.action === 'SYNC_STARTED') {
       handleSyncStarted();
     } else if (request.action === 'SYNC_PROGRESS') {
@@ -322,7 +332,7 @@ function setupMessageListener() {
       handleSyncComplete(request.syncedCount, request.failedCount);
       currentPage = 1;
       loadPosts();
-      fetchAllHashtags(); // Refresh hashtags after sync
+      scheduleFetchAllHashtags(); // Refresh hashtags after sync (debounced)
     } else if (request.action === 'IMPORT_FAILED') {
       handleSyncError(request.error || 'Sync failed. Please try again.');
     } else if (request.action === 'SYNC_STOPPED') {
@@ -418,6 +428,8 @@ function extractHashtags(text) {
 
 // Cache for all hashtags from database
 let allHashtagsCache = [];
+// Keep last rendered hashtag snapshot to avoid unnecessary DOM updates
+let lastRenderedHashtags = '';
 
 // Fetch all hashtags from database
 function fetchAllHashtags() {
@@ -470,6 +482,18 @@ function updateHashtagChips() {
   ].filter(Boolean);
 
   const hashtagsWithCounts = getHashtagsWithCounts();
+
+  // If we're currently syncing and there are no hashtags available yet,
+  // avoid clearing the UI (this prevents flashing while the DB is being
+  // updated). We'll refresh once a non-empty set arrives or syncing ends.
+  if (isSyncing && (!hashtagsWithCounts || hashtagsWithCounts.length === 0)) {
+    return;
+  }
+
+  // Serialize current hashtags for quick diffing to avoid re-rendering
+  const serialized = (hashtagsWithCounts || []).slice(0, 25).map(h => `${h.tag}:${h.count}`).join(',');
+  if (serialized === lastRenderedHashtags) return; // No change, skip DOM updates
+  lastRenderedHashtags = serialized;
 
   containers.forEach(container => {
     container.innerHTML = '';
@@ -1225,7 +1249,8 @@ function checkSyncProgress() {
       const progress = result.instagram_sync_progress;
       if (resumeInfo) {
         resumeInfo.style.display = 'flex';
-        resumeDetails.textContent = `${progress.synced} synced, ${progress.failed} failed`;
+        const totalText = (typeof progress.total === 'number' && progress.total > 0) ? ` of ${progress.total}` : '';
+        resumeDetails.textContent = `${progress.synced} synced, ${progress.failed} failed${totalText}`;
       }
       if (startBtn) {
         startBtn.innerHTML = `
@@ -1236,7 +1261,7 @@ function checkSyncProgress() {
         `;
       }
       // Update stats display
-      updateSyncPanelProgress(progress.synced, progress.failed);
+      updateSyncPanelProgress(progress.synced, progress.failed, progress.total);
     } else {
       if (resumeInfo) resumeInfo.style.display = 'none';
       if (startBtn) {
@@ -1256,6 +1281,9 @@ function clearSyncProgress() {
     checkSyncProgress();
     document.getElementById('sync-synced-count').textContent = '0';
     document.getElementById('sync-failed-count').textContent = '0';
+    const totalElement = document.getElementById('sync-total-count');
+    if (totalElement) totalElement.textContent = '0';
+    lastKnownSyncTotal = 0;
   });
 }
 
@@ -1367,15 +1395,23 @@ function handleSyncStarted() {
 }
 
 function updateSyncPanelProgress(synced, failed, total = 0) {
-  document.getElementById('sync-synced-count').textContent = synced || 0;
-  document.getElementById('sync-failed-count').textContent = failed || 0;
+  const syncedSafe = (typeof synced === 'number') ? synced : 0;
+  const failedSafe = (typeof failed === 'number') ? failed : 0;
+
+  document.getElementById('sync-synced-count').textContent = syncedSafe;
+  document.getElementById('sync-failed-count').textContent = failedSafe;
   const totalElement = document.getElementById('sync-total-count');
+  // Only update total when we have a meaningful value. A transient 0 from the
+  // content script (unknown total) should not wipe a previously known total.
+  if (typeof total === 'number' && total > 0) {
+    lastKnownSyncTotal = total;
+  }
   if (totalElement) {
-    totalElement.textContent = total || 0;
+    totalElement.textContent = (lastKnownSyncTotal > 0) ? lastKnownSyncTotal : (typeof total === 'number' ? total : 0);
   }
 
   const progressBar = document.getElementById('sync-progress-bar');
-  const processed = (synced || 0) + (failed || 0);
+  const processed = syncedSafe + failedSafe;
 
   // Only update main page sync status if actively syncing
   // (not when just displaying saved progress from a previous session)
@@ -1411,7 +1447,7 @@ function handleSyncComplete(syncedCount, failedCount) {
 
   if (progressBar) progressBar.style.width = '100%';
 
-  updateSyncPanelProgress(syncedCount, failedCount);
+  updateSyncPanelProgress(syncedCount, failedCount, lastKnownSyncTotal);
 
   if (startBtn) {
     startBtn.disabled = false;
@@ -1446,7 +1482,7 @@ function handleSyncStopped(syncedCount, failedCount) {
   const stopBtn = document.getElementById('sync-stop-btn');
   const headerBtn = document.getElementById('sync-btn');
 
-  updateSyncPanelProgress(syncedCount, failedCount);
+  updateSyncPanelProgress(syncedCount, failedCount, lastKnownSyncTotal);
 
   if (startBtn) {
     startBtn.disabled = false;

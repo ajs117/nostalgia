@@ -838,7 +838,7 @@ async function saveBatchIfFull(batchBuffer, syncedCount, failedCount, currentMin
     // Throttle progress saves - only save every 5 seconds to avoid blocking
     const now = Date.now();
     if (now - lastProgressSave >= PROGRESS_SAVE_INTERVAL) {
-      await saveProgress(currentMinId || savedMinId || '', maxId || savedMaxId || '', syncedCount, failedCount);
+      await saveProgress(currentMinId || savedMinId || '', maxId || savedMaxId || '', syncedCount, failedCount, total);
       lastProgressSave = now;
     }
 
@@ -1258,12 +1258,19 @@ async function getInstagramSavedPosts() {
 
     // Save remaining posts (even if stopped, save what we have)
     if (batchBuffer.length > 0) {
-      await saveBatch(batchBuffer);
-      syncedCount += batchBuffer.length;
+      const result = await saveBatch(batchBuffer);
+      const addedCount = result?.added || batchBuffer.length;
+      syncedCount += addedCount;
     }
 
     // Save progress (always, even if stopped)
-    await saveProgress(currentMinId || savedMinId || '', maxId || savedMaxId || '', syncedCount, failedCount);
+    await saveProgress(
+      currentMinId || savedMinId || '',
+      maxId || savedMaxId || '',
+      syncedCount,
+      failedCount,
+      totalSavedCount
+    );
     lastProgressSave = Date.now();
     updateSyncProgress(syncedCount, failedCount, totalSavedCount);
 
@@ -1296,7 +1303,7 @@ async function saveBatch(posts) {
   });
 }
 
-async function saveProgress(minId, maxId, synced, failed) {
+async function saveProgress(minId, maxId, synced, failed, total = 0) {
   return new Promise((resolve) => {
     chrome.storage.local.set({
       [SYNC_PROGRESS_KEY]: {
@@ -1304,6 +1311,7 @@ async function saveProgress(minId, maxId, synced, failed) {
         maxId: maxId || '',
         synced,
         failed,
+        total,
         timestamp: Date.now()
       }
     }, resolve);
