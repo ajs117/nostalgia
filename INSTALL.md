@@ -1,8 +1,24 @@
 # Installing Nostalgia Extension
 
+The recommended install path is to build the extension and load the generated `dist` folder as an unpacked extension.
+
+## Build First
+
+```bash
+npm run build
+```
+
+Optional: create a versioned archive for release handoff.
+
+```bash
+npm run package
+```
+
+This creates `nostalgia-v<version>.zip` in the project root.
+
 ## Microsoft Edge
 
-### Option 1: Load Unpacked (Recommended for Development)
+### Load Unpacked
 
 1. Open Microsoft Edge
 2. Navigate to `edge://extensions/`
@@ -11,29 +27,9 @@
 5. Select the `dist` folder from the nostalgia directory
 6. The extension will be installed and ready to use!
 
-### Option 2: Install from .crx File
-
-1. Open Microsoft Edge
-2. Navigate to `edge://extensions/`
-3. Enable **Developer mode** (toggle in the bottom-left corner)
-4. Drag and drop the `.crx` file onto the extensions page
-5. Click **"Add extension"** when prompted
-
-**Note:** If Edge blocks the installation, you may need to:
-- Right-click the `.crx` file → Properties → Unblock → OK
-- Then try dragging it again
-
-### Option 3: Manual Installation
-
-1. Open Microsoft Edge
-2. Navigate to `edge://extensions/`
-3. Enable **Developer mode**
-4. Click **"Load unpacked"**
-5. Browse to the `dist` folder and select it
-
 ## Google Chrome
 
-### Load Unpacked (Recommended)
+### Load Unpacked
 
 1. Open Google Chrome
 2. Navigate to `chrome://extensions/`
@@ -41,19 +37,12 @@
 4. Click **"Load unpacked"** button
 5. Select the `dist` folder from the nostalgia directory
 
-### Install from .crx File
-
-1. Open Google Chrome
-2. Navigate to `chrome://extensions/`
-3. Enable **Developer mode**
-4. Drag and drop the `.crx` file onto the extensions page
-5. Click **"Add extension"** when prompted
-
 ## Troubleshooting
 
 ### Extension Not Loading
 
 - Make sure you selected the `dist` folder, not the parent directory
+- Run `npm run build` again if `dist` is missing or stale
 - Check that all files are present in the `dist` folder
 - Look for error messages in the extensions page
 

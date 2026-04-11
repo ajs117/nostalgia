@@ -5,7 +5,7 @@
          "16": "logo16.png",
          "48": "logo48.png"
       },
-      "default_title": "nostalgia"
+      "default_title": "__MSG_actionTitle__"
    },
    "background": {
       "service_worker": "background.js"
@@ -20,7 +20,8 @@
          ]
       }
    ],
-   "description": "Sync and organize your Instagram saved posts.",
+   "default_locale": "en",
+   "description": "__MSG_appDescription__",
    "host_permissions": [
       "https://*.instagram.com/*",
       "https://i.instagram.com/*",
@@ -35,13 +36,14 @@
       "512": "logo512.png"
    },
    "manifest_version": 3,
-   "name": "nostalgia",
+   "name": "__MSG_appName__",
    "permissions": [
+      "downloads",
       "storage",
       "scripting",
       "tabs"
    ],
-   "version": "1.8",
+   "version": "2.0.0",
    "web_accessible_resources": [
       {
          "matches": [

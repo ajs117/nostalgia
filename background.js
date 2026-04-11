@@ -1,3 +1,4 @@
+/** @type {string[]} */
 let capturedImages = [];
 let capturedImagesCleanupTimeout = null;
 let extensionTabId = null;
@@ -137,6 +138,104 @@ function safeBroadcast(message) {
   });
 }
 
+function sanitizeDownloadFilename(filename) {
+  const sanitized = Array.from(filename || 'nostalgia-media', (character) => {
+    const codePoint = character.charCodeAt(0);
+    if ('<>:"/\\|?*'.includes(character) || codePoint < 32) {
+      return '-';
+    }
+    return character;
+  }).join('');
+
+  return sanitized
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 160) || 'nostalgia-media';
+}
+
+function waitForTabToComplete(tabId) {
+  return new Promise((resolve, reject) => {
+    let timeoutId = null;
+
+    const cleanup = () => {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+      chrome.tabs.onUpdated.removeListener(handleUpdate);
+    };
+
+    const handleUpdate = (updatedTabId, info) => {
+      if (updatedTabId === tabId && info.status === 'complete') {
+        cleanup();
+        setTimeout(() => resolve(tabId), 1200);
+      }
+    };
+
+    chrome.tabs.onUpdated.addListener(handleUpdate);
+
+    timeoutId = setTimeout(() => {
+      cleanup();
+      reject(new Error('Timed out waiting for Instagram tab to load'));
+    }, 15000);
+
+    chrome.tabs.get(tabId, (tab) => {
+      if (chrome.runtime.lastError) {
+        cleanup();
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+
+      if (tab && tab.status === 'complete') {
+        cleanup();
+        setTimeout(() => resolve(tabId), 1200);
+      }
+    });
+  });
+}
+
+function ensureInstagramTabForAction() {
+  return new Promise((resolve, reject) => {
+    if (activeInstagramTabId !== null) {
+      chrome.tabs.get(activeInstagramTabId, (tab) => {
+        if (!chrome.runtime.lastError && tab) {
+          resolve(activeInstagramTabId);
+          return;
+        }
+
+        activeInstagramTabId = null;
+        chrome.tabs.create({ url: 'https://www.instagram.com/', active: false }, (newTab) => {
+          if (chrome.runtime.lastError || !newTab) {
+            reject(new Error(chrome.runtime.lastError?.message || 'Failed to open Instagram tab'));
+            return;
+          }
+
+          activeInstagramTabId = newTab.id;
+          waitForTabToComplete(newTab.id).then(resolve).catch(reject);
+        });
+      });
+      return;
+    }
+
+    chrome.tabs.query({ url: 'https://www.instagram.com/*' }, (tabs) => {
+      if (tabs && tabs.length > 0) {
+        activeInstagramTabId = tabs[0].id;
+        resolve(activeInstagramTabId);
+        return;
+      }
+
+      chrome.tabs.create({ url: 'https://www.instagram.com/', active: false }, (newTab) => {
+        if (chrome.runtime.lastError || !newTab) {
+          reject(new Error(chrome.runtime.lastError?.message || 'Failed to open Instagram tab'));
+          return;
+        }
+
+        activeInstagramTabId = newTab.id;
+        waitForTabToComplete(newTab.id).then(resolve).catch(reject);
+      });
+    });
+  });
+}
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   // Handle messages - each must explicitly return true (async) or false (sync)
 
@@ -213,8 +312,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     const filterType = request.filterType || 'all';
     const searchQuery = request.searchQuery || '';
     const hashtagFilter = request.hashtagFilter || null;
+    const randomSeed = Number.isFinite(request.randomSeed) ? request.randomSeed : null;
 
-    getPostsPaginated(page, limit, sortBy, filterType, searchQuery, hashtagFilter).then((result) => {
+    getPostsPaginated(page, limit, sortBy, filterType, searchQuery, hashtagFilter, randomSeed).then((result) => {
       sendResponse({
         success: true,
         posts: result.posts,
@@ -236,6 +336,61 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       console.error('Error retrieving collections:', error);
       sendResponse({ success: false, error: error.message, collections: [] });
     });
+    return true;
+  }
+
+  if (request.action === 'DOWNLOAD_MEDIA') {
+    if (!request.url) {
+      sendResponse({ success: false, error: 'No media URL provided' });
+      return false;
+    }
+
+    chrome.downloads.download({
+      url: request.url,
+      filename: sanitizeDownloadFilename(request.filename),
+      saveAs: true,
+      conflictAction: 'uniquify'
+    }, (downloadId) => {
+      if (chrome.runtime.lastError) {
+        sendResponse({ success: false, error: chrome.runtime.lastError.message });
+        return;
+      }
+
+      sendResponse({ success: true, downloadId });
+    });
+
+    return true;
+  }
+
+  if (request.action === 'ADD_POST_TO_NOSTALGIA_COLLECTION') {
+    const post = request.post;
+    if (!post || !post.id || !post.link) {
+      sendResponse({ success: false, error: 'Post metadata is incomplete' });
+      return false;
+    }
+
+    ensureInstagramTabForAction().then((tabId) => {
+      chrome.tabs.sendMessage(tabId, {
+        action: 'ADD_POST_TO_NOSTALGIA_COLLECTION',
+        post
+      }, (response) => {
+        if (chrome.runtime.lastError) {
+          sendResponse({ success: false, error: chrome.runtime.lastError.message });
+          return;
+        }
+
+        if (response?.updatedCollections) {
+          storeCollectionsInIndexedDB(response.updatedCollections).catch((error) => {
+            console.error('Error updating collections cache:', error);
+          });
+        }
+
+        sendResponse(response || { success: false, error: 'No response from Instagram tab' });
+      });
+    }).catch((error) => {
+      sendResponse({ success: false, error: error.message });
+    });
+
     return true;
   }
 
@@ -442,6 +597,20 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (activeInstagramTabId) {
       safeSendToTab(activeInstagramTabId, { action: 'IMPORT_FAILED', error: request.error });
     }
+    return false;
+  }
+
+  if (request.action === 'SYNC_LOGIN_REQUIRED') {
+    safeBroadcast({ action: 'SYNC_LOGIN_REQUIRED', error: request.error });
+
+    if (activeInstagramTabId) {
+      chrome.tabs.update(activeInstagramTabId, { active: true }, () => {
+        if (chrome.runtime.lastError) {
+          // Tab may have been closed by the user.
+        }
+      });
+    }
+
     return false;
   }
 
@@ -1352,8 +1521,33 @@ async function getDbBounds() {
   }
 }
 
+function stableHashString(value) {
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i++) {
+    hash ^= value.charCodeAt(i);
+    hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+  }
+  return hash >>> 0;
+}
+
+function comparePostsForStableRandom(a, b, randomSeed) {
+  const seed = Number.isFinite(randomSeed) ? Math.trunc(randomSeed) : 0;
+  const aIdentity = a.id || a.link || a.username || a.title || '';
+  const bIdentity = b.id || b.link || b.username || b.title || '';
+  const aWeight = stableHashString(`${seed}:${aIdentity}`);
+  const bWeight = stableHashString(`${seed}:${bIdentity}`);
+
+  if (aWeight !== bWeight) {
+    return aWeight - bWeight;
+  }
+
+  const fallbackA = `${aIdentity}:${a.timestamp || 0}`;
+  const fallbackB = `${bIdentity}:${b.timestamp || 0}`;
+  return fallbackA.localeCompare(fallbackB);
+}
+
 // Get posts with pagination, sorting, and filtering
-async function getPostsPaginated(page = 1, limit = 50, sortBy = 'newest-saved', filterType = 'all', searchQuery = '', hashtagFilter = null) {
+async function getPostsPaginated(page = 1, limit = 50, sortBy = 'newest-saved', filterType = 'all', searchQuery = '', hashtagFilter = null, randomSeed = null) {
   let db;
   try {
     db = await openDB();
@@ -1614,10 +1808,7 @@ async function getPostsPaginated(page = 1, limit = 50, sortBy = 'newest-saved', 
                 return titleA.localeCompare(titleB);
               });
             } else if (isRandomSort) {
-              for (let i = sorted.length - 1; i > 0; i--) {
-                const j = Math.floor(Math.random() * (i + 1));
-                [sorted[i], sorted[j]] = [sorted[j], sorted[i]];
-              }
+              sorted.sort((a, b) => comparePostsForStableRandom(a, b, randomSeed));
             } else {
               // Default fallback: timestamp descending
               sorted.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
@@ -1773,6 +1964,116 @@ async function _getMediaFromIndexedDB(key) {
   }
 }
 
+let hashtagCacheRebuildScheduled = false;
+let hashtagCacheRebuildInProgress = false;
+
+async function rebuildHashtagCache(expectedCount = null) {
+  let db;
+  try {
+    db = await openDB();
+
+    return await new Promise((resolve, reject) => {
+      const transaction = db.transaction([STORE_POSTS, STORE_METADATA], 'readwrite');
+      const postsStore = transaction.objectStore(STORE_POSTS);
+      const metadataStore = transaction.objectStore(STORE_METADATA);
+      const hashtagCounts = new Map();
+      const cursorRequest = postsStore.openCursor();
+      let resolvedCount = Number.isFinite(expectedCount);
+      let currentCount = Number.isFinite(expectedCount) ? expectedCount : 0;
+
+      if (!resolvedCount) {
+        const countRequest = postsStore.count();
+        countRequest.onsuccess = () => {
+          currentCount = countRequest.result;
+          resolvedCount = true;
+        };
+        countRequest.onerror = () => {
+          currentCount = 0;
+          resolvedCount = true;
+        };
+      }
+
+      const extractHashtags = (text) => {
+        if (!text || typeof text !== 'string') return [];
+        const hashtagRegex = /#[\w]+/g;
+        const matches = text.match(hashtagRegex);
+        return matches ? matches.map(tag => tag.toLowerCase()) : [];
+      };
+
+      const finalize = () => {
+        const hashtags = Array.from(hashtagCounts.entries())
+          .map(([tag, count]) => ({ tag, count }))
+          .sort((a, b) => b.count - a.count);
+
+        metadataStore.put({ count: currentCount, hashtags }, 'hashtags_cache');
+        resolve(hashtags);
+      };
+
+      cursorRequest.onsuccess = (event) => {
+        const cursor = event.target.result;
+        if (!cursor) {
+          if (resolvedCount) {
+            finalize();
+          } else {
+            setTimeout(finalize, 0);
+          }
+          return;
+        }
+
+        const post = cursor.value;
+        if (post && post.title) {
+          extractHashtags(post.title).forEach(tag => {
+            if (tag) {
+              hashtagCounts.set(tag, (hashtagCounts.get(tag) || 0) + 1);
+            }
+          });
+        }
+
+        cursor.continue();
+      };
+
+      cursorRequest.onerror = () => {
+        reject(cursorRequest.error || new Error('Cursor error'));
+      };
+
+      transaction.oncomplete = () => {
+        db.close();
+      };
+
+      transaction.onerror = () => {
+        reject(transaction.error || new Error('Transaction error'));
+      };
+    });
+  } catch (error) {
+    if (db) db.close();
+    throw error;
+  }
+}
+
+function scheduleHashtagCacheRebuild(expectedCount = null) {
+  if (hashtagCacheRebuildScheduled || hashtagCacheRebuildInProgress) {
+    return;
+  }
+
+  hashtagCacheRebuildScheduled = true;
+
+  setTimeout(async () => {
+    hashtagCacheRebuildScheduled = false;
+    if (hashtagCacheRebuildInProgress) {
+      return;
+    }
+
+    hashtagCacheRebuildInProgress = true;
+    try {
+      await rebuildHashtagCache(expectedCount);
+    } catch (error) {
+      console.error('Background hashtag cache rebuild failed:', error);
+    } finally {
+      hashtagCacheRebuildInProgress = false;
+    }
+  }, 750);
+}
+
 // Get all hashtags with counts from all posts (with caching)
 async function getAllHashtagsWithCounts() {
   let db;
@@ -1780,12 +2081,9 @@ async function getAllHashtagsWithCounts() {
     db = await openDB();
 
     return new Promise((resolve, reject) => {
-      // Readonly is enough for cache lookup + count and reduces write-lock contention.
       const transaction = db.transaction([STORE_POSTS, STORE_METADATA], 'readonly');
       const store = transaction.objectStore(STORE_POSTS);
       const metaStore = transaction.objectStore(STORE_METADATA);
-
-      // Check cache first
       const cacheRequest = metaStore.get('hashtags_cache');
       const countRequest = store.count();
 
@@ -1799,34 +2097,27 @@ async function getAllHashtagsWithCounts() {
       cacheRequest.onsuccess = () => {
         cacheData = cacheRequest.result;
 
-        // Wait for count to be ready, then check cache validity
         transaction.oncomplete = () => {
-          // If cache is valid (count matches), return cached data
           if (cacheData && cacheData.count === currentCount && cacheData.hashtags) {
             db.close();
             resolve(cacheData.hashtags);
             return;
           }
 
-          // If cache exists but is stale and a sync appears to be active,
-          // return the cached hashtags (stale) to avoid repeatedly
-          // scanning the entire DB during an active sync which can be
-          // very expensive for large datasets.
           if (cacheData && typeof activeInstagramTabId !== 'undefined' && activeInstagramTabId) {
             db.close();
+            scheduleHashtagCacheRebuild(currentCount);
             resolve(cacheData.hashtags || []);
             return;
           }
 
-          // Cache miss or no active sync - recalculate
-          recalculateHashtags();
+          rebuildHashtagCache(currentCount).then(resolve).catch(reject);
         };
       };
 
       cacheRequest.onerror = () => {
-        // On error, just recalculate
         transaction.oncomplete = () => {
-          recalculateHashtags();
+          rebuildHashtagCache(currentCount).then(resolve).catch(reject);
         };
       };
 
@@ -1834,74 +2125,11 @@ async function getAllHashtagsWithCounts() {
         db.close();
         reject(transaction.error || new Error('Transaction error'));
       };
-
-      async function recalculateHashtags() {
-        let recalcDb;
-        try {
-          recalcDb = await openDB();
-          const recalcTransaction = recalcDb.transaction([STORE_POSTS, STORE_METADATA], 'readwrite');
-          const recalcStore = recalcTransaction.objectStore(STORE_POSTS);
-          const recalcMetaStore = recalcTransaction.objectStore(STORE_METADATA);
-
-          const hashtagCounts = new Map();
-          const cursorRequest = recalcStore.openCursor();
-
-          // Helper to extract hashtags from text
-          const extractHashtags = (text) => {
-            if (!text || typeof text !== 'string') return [];
-            const hashtagRegex = /#[\w]+/g;
-            const matches = text.match(hashtagRegex);
-            return matches ? matches.map(tag => tag.toLowerCase()) : [];
-          };
-
-          cursorRequest.onsuccess = (event) => {
-            const cursor = event.target.result;
-            if (cursor) {
-              const post = cursor.value;
-              if (post && post.title) {
-                const caption = post.title || '';
-                extractHashtags(caption).forEach(tag => {
-                  if (tag) {
-                    hashtagCounts.set(tag, (hashtagCounts.get(tag) || 0) + 1);
-                  }
-                });
-              }
-              cursor.continue();
-            } else {
-              // Convert to array and sort by count
-              const hashtags = Array.from(hashtagCounts.entries())
-                .map(([tag, count]) => ({ tag, count }))
-                .sort((a, b) => b.count - a.count);
-
-              // Store in cache
-              recalcMetaStore.put({ count: currentCount, hashtags }, 'hashtags_cache');
-
-              recalcTransaction.oncomplete = () => {
-                recalcDb.close();
-                resolve(hashtags);
-              };
-            }
-          };
-
-          cursorRequest.onerror = () => {
-            recalcDb.close();
-            reject(cursorRequest.error || new Error('Cursor error'));
-          };
-
-          recalcTransaction.onerror = () => {
-            recalcDb.close();
-            reject(recalcTransaction.error || new Error('Transaction error'));
-          };
-        } catch (error) {
-          if (recalcDb) recalcDb.close();
-          reject(error);
-        }
-      }
     });
   } catch (error) {
     if (db) db.close();
     console.error('Error in getAllHashtagsWithCounts:', error);
-    return Promise.resolve([]); // Return empty array instead of throwing
+    return Promise.resolve([]);
   }
 }
 

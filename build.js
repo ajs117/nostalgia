@@ -80,6 +80,26 @@ function copyFile(src, dest) {
   fs.copyFileSync(src, dest);
 }
 
+function copyDirectory(src, dest) {
+  if (!fs.existsSync(src)) {
+    return;
+  }
+
+  fs.mkdirSync(dest, { recursive: true });
+  const entries = fs.readdirSync(src, { withFileTypes: true });
+
+  entries.forEach((entry) => {
+    const srcPath = path.join(src, entry.name);
+    const destPath = path.join(dest, entry.name);
+
+    if (entry.isDirectory()) {
+      copyDirectory(srcPath, destPath);
+    } else {
+      copyFile(srcPath, destPath);
+    }
+  });
+}
+
 async function build() {
   const distDir = path.join(__dirname, 'dist');
 
@@ -94,7 +114,7 @@ async function build() {
   console.log('');
 
   // Copy and minify JS files
-  const jsFiles = ['background.js', 'contentScript.js', 'app.js'];
+  const jsFiles = ['background.js', 'contentScript.js', 'i18n.js', 'app.js'];
   const originalSizes = {};
   const minifiedSizes = {};
 
@@ -163,6 +183,9 @@ async function build() {
   copyFile(path.join(__dirname, 'manifest.json'), path.join(distDir, 'manifest.json'));
   console.log('✓ Copied manifest.json');
 
+  copyDirectory(path.join(__dirname, '_locales'), path.join(distDir, '_locales'));
+  console.log('✓ Copied _locales');
+
   // Convert SVG to PNG icons if sharp is available, otherwise copy existing PNGs
   const svgPath = path.join(__dirname, 'logo.svg');
   if (fs.existsSync(svgPath) && sharp) {
@@ -218,7 +241,7 @@ async function build() {
 }
 
 function copyExistingAssets(distDir) {
-  const assets = ['logo192.png', 'logo512.png', 'favicon.ico'];
+  const assets = ['logo16.png', 'logo48.png', 'logo128.png', 'logo192.png', 'logo512.png', 'favicon.ico'];
   assets.forEach(asset => {
     const src = path.join(__dirname, asset);
     if (fs.existsSync(src)) {

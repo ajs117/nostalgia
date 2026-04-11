@@ -1,5 +1,7 @@
 // App state
+/** @type {NostalgiaPost[]} */
 let allPosts = [];
+/** @type {NostalgiaPost[]} */
 let displayedPosts = [];
 let currentPage = 1;
 let postsPerPage = 20; // Will be adjusted for complete rows
@@ -9,10 +11,277 @@ let currentHashtagFilter = null;
 let currentSearchQuery = '';
 let currentModalIndex = -1;
 let currentCarouselIndex = 0; // Track which item in a carousel is being viewed
-let isLoading = false;
+let currentRandomSeed = null;
+let currentModalVideoUrl = null;
+const MODAL_MEDIA_CACHE_MAX_ENTRIES = 24;
+/** @type {Map<string, ModalCachedMedia>} */
+let modalMediaCache = new Map();
+let latestLoadRequestId = 0;
 let totalPosts = 0;
 let isSyncing = false;
 let lastKnownSyncTotal = 0;
+let currentTheme = 'dark';
+let currentLanguage = 'en';
+let currentAutoplayEnabled = true;
+/** @type {LocalizedSyncStatusState} */
+let currentSyncStatusState = { status: '', key: null, params: null };
+
+const THEME_STORAGE_KEY = 'nostalgia_theme';
+const LANGUAGE_STORAGE_KEY = 'nostalgia_language';
+const AUTOPLAY_STORAGE_KEY = 'nostalgia_autoplay';
+
+function getI18nApi() {
+  /** @type {NostalgiaI18nApi} */
+  return window.NostalgiaI18n || {
+    detectLanguage: () => 'en',
+    getLanguages: () => ({ en: { label: 'English', lang: 'en', dir: 'ltr' } }),
+    getLanguage: () => 'en',
+    setLanguage: () => 'en',
+    applyTranslations: () => { },
+    t: (key, params = {}) => Object.keys(params).length > 0 ? `${key} ${JSON.stringify(params)}` : key
+  };
+}
+
+function t(key, params = {}) {
+  return getI18nApi().t(key, params);
+}
+
+function buildButtonMarkup(label, iconMarkup = '') {
+  return `${iconMarkup}<span>${label}</span>`;
+}
+
+function getSyncIconMarkup(spinning = false) {
+  return `
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"${spinning ? ' class="spin"' : ''}>
+      <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0118.8-4.3M22 12.5a10 10 0 01-18.8 4.3"/>
+    </svg>
+  `;
+}
+
+function getPlayIconMarkup() {
+  return `
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+      <polygon points="5 3 19 12 5 21 5 3"/>
+    </svg>
+  `;
+}
+
+function getSpinnerIconMarkup(size = 18) {
+  return `
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="${size}" height="${size}" class="spin">
+      <circle cx="12" cy="12" r="10"/>
+    </svg>
+  `;
+}
+
+function getTrashIconMarkup() {
+  return `
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+      <polyline points="3 6 5 6 21 6"/>
+      <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/>
+      <line x1="10" y1="11" x2="10" y2="17"/>
+      <line x1="14" y1="11" x2="14" y2="17"/>
+    </svg>
+  `;
+}
+
+function applyTheme(theme) {
+  currentTheme = theme === 'light' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = currentTheme;
+  localStorage.setItem(THEME_STORAGE_KEY, currentTheme);
+
+  const themeSelect = document.getElementById('theme-select');
+  if (themeSelect && themeSelect.value !== currentTheme) {
+    themeSelect.value = currentTheme;
+  }
+}
+
+function isModalAutoplayCapable(post) {
+  if (!post) return false;
+  if (post.isVideo) return true;
+  return !!(post.isCarousel && post.carouselMedia && post.carouselMedia.some((item) => item?.isVideo));
+}
+
+function getAutoplayButtonLabel() {
+  return currentAutoplayEnabled ? t('autoplayOn') : t('autoplayOff');
+}
+
+function updateModalAutoplayButton(post = getCurrentModalPost()) {
+  const autoplayBtn = document.getElementById('modal-autoplay-btn');
+  if (!autoplayBtn) return;
+
+  const shouldShow = isModalAutoplayCapable(post);
+  autoplayBtn.style.display = shouldShow ? '' : 'none';
+  autoplayBtn.textContent = getAutoplayButtonLabel();
+  autoplayBtn.setAttribute('aria-pressed', currentAutoplayEnabled ? 'true' : 'false');
+}
+
+function applyAutoplayPreference(enabled) {
+  currentAutoplayEnabled = enabled !== false;
+  localStorage.setItem(AUTOPLAY_STORAGE_KEY, currentAutoplayEnabled ? 'true' : 'false');
+  updateModalAutoplayButton();
+}
+
+function toggleModalAutoplay() {
+  applyAutoplayPreference(!currentAutoplayEnabled);
+
+  if (!currentAutoplayEnabled) {
+    return;
+  }
+
+  const activeVideo = document.querySelector('#modal-media video');
+  if (activeVideo) {
+    activeVideo.play().catch(() => { });
+  }
+
+  preloadUpcomingModalMedia();
+}
+
+function getResumeDetailsText(progress) {
+  const params = {
+    synced: progress.synced || 0,
+    failed: progress.failed || 0,
+    total: progress.total || 0
+  };
+
+  return (typeof progress.total === 'number' && progress.total > 0)
+    ? t('resumeDetailsWithTotal', params)
+    : t('resumeDetailsWithoutTotal', params);
+}
+
+function updateLocalizedSyncStatus(status, key, params = {}) {
+  currentSyncStatusState = { status, key, params };
+  updateSyncStatus(status, key ? t(key, params) : '');
+}
+
+function populateLanguageSelect() {
+  const languageSelect = document.getElementById('language-select');
+  if (!languageSelect) return;
+
+  const languages = getI18nApi().getLanguages();
+  languageSelect.innerHTML = '';
+
+  Object.entries(languages).forEach(([value, metadata]) => {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = metadata.label;
+    languageSelect.appendChild(option);
+  });
+
+  languageSelect.value = currentLanguage;
+}
+
+function rerenderLocalizedUi() {
+  getI18nApi().applyTranslations(document);
+  document.title = t('documentTitle');
+
+  const searchInput = document.getElementById('search-input');
+  const searchInputMobile = document.getElementById('search-input-mobile');
+  if (searchInput) searchInput.placeholder = t('searchPlaceholder');
+  if (searchInputMobile) searchInputMobile.placeholder = t('searchPlaceholder');
+
+  updateHashtagChips();
+  renderPosts();
+  updateStats();
+  renderPagination();
+  checkSyncProgress();
+
+  if (isSyncing) {
+    restoreSyncingState();
+  }
+
+  if (currentSyncStatusState.key) {
+    updateLocalizedSyncStatus(currentSyncStatusState.status, currentSyncStatusState.key, currentSyncStatusState.params || {});
+  }
+
+  if (currentModalIndex >= 0) {
+    const activeModalIndex = currentModalIndex;
+    const activeCarouselIndex = currentCarouselIndex;
+    openModal(activeModalIndex, activeCarouselIndex);
+  }
+}
+
+function applyLanguage(language) {
+  currentLanguage = getI18nApi().setLanguage(language);
+  localStorage.setItem(LANGUAGE_STORAGE_KEY, currentLanguage);
+
+  const languageSelect = document.getElementById('language-select');
+  if (languageSelect && languageSelect.value !== currentLanguage) {
+    languageSelect.value = currentLanguage;
+  }
+
+  rerenderLocalizedUi();
+}
+
+function initializePreferences() {
+  currentLanguage = localStorage.getItem(LANGUAGE_STORAGE_KEY) || getI18nApi().detectLanguage();
+  currentTheme = localStorage.getItem(THEME_STORAGE_KEY) || 'dark';
+  currentAutoplayEnabled = localStorage.getItem(AUTOPLAY_STORAGE_KEY) !== 'false';
+
+  populateLanguageSelect();
+  applyTheme(currentTheme);
+  applyLanguage(currentLanguage);
+  applyAutoplayPreference(currentAutoplayEnabled);
+
+  const languageSelect = document.getElementById('language-select');
+  const themeSelect = document.getElementById('theme-select');
+
+  if (languageSelect) {
+    languageSelect.value = currentLanguage;
+    languageSelect.addEventListener('change', (event) => applyLanguage(event.target.value));
+  }
+
+  if (themeSelect) {
+    themeSelect.value = currentTheme;
+    themeSelect.addEventListener('change', (event) => applyTheme(event.target.value));
+  }
+}
+
+function openSettingsModal() {
+  const modal = document.getElementById('settings-modal');
+  const overlay = document.getElementById('settings-modal-overlay');
+  const languageSelect = document.getElementById('language-select');
+  const themeSelect = document.getElementById('theme-select');
+
+  if (languageSelect) {
+    languageSelect.value = currentLanguage;
+  }
+
+  if (themeSelect) {
+    themeSelect.value = currentTheme;
+  }
+
+  if (modal) modal.classList.add('active');
+  if (overlay) overlay.classList.add('active');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeSettingsModal() {
+  const modal = document.getElementById('settings-modal');
+  const overlay = document.getElementById('settings-modal-overlay');
+
+  if (modal) modal.classList.remove('active');
+  if (overlay) overlay.classList.remove('active');
+  document.body.style.overflow = '';
+}
+
+function setupSettingsModal() {
+  const settingsBtn = document.getElementById('settings-btn');
+  const closeBtn = document.getElementById('settings-modal-close');
+  const overlay = document.getElementById('settings-modal-overlay');
+
+  if (settingsBtn) {
+    settingsBtn.addEventListener('click', openSettingsModal);
+  }
+
+  if (closeBtn) {
+    closeBtn.addEventListener('click', closeSettingsModal);
+  }
+
+  if (overlay) {
+    overlay.addEventListener('click', closeSettingsModal);
+  }
+}
 
 // Debounce helper
 function debounce(func, wait) {
@@ -40,7 +309,7 @@ const scheduleFetchAllHashtags = debounce(() => {
 function createVideoElement(src) {
   const video = document.createElement('video');
   video.src = src;
-  video.preload = 'metadata';
+  video.preload = 'auto';
 
   // Restore volume preference
   const savedVolume = localStorage.getItem('video_volume');
@@ -72,7 +341,7 @@ function createVideoElement(src) {
 
   video.onerror = () => {
     console.error('Video playback error:', src);
-    video.parentElement.innerHTML = '<div class="media-error">Video failed to load</div>';
+    video.parentElement.innerHTML = `<div class="media-error">${t('failedToLoadVideo')}</div>`;
   };
   return video;
 }
@@ -85,7 +354,7 @@ function createImageElement(src) {
     img.src = placeholder;
   } else if (typeof src === 'string' && src.startsWith('data:')) {
     img.src = src;
-    img.alt = 'Instagram post';
+    img.alt = t('postFallbackTitle');
     img.loading = 'lazy';
     img.style.width = '100%';
     img.style.height = '100%';
@@ -129,11 +398,14 @@ function calculatePostsPerPage() {
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
   postsPerPage = calculatePostsPerPage();
+  initializePreferences();
   initializeEventListeners();
+  updateRandomControlsVisibility();
   loadPosts(false, true); // Load posts and fetch hashtags after posts load successfully
   setupMessageListener();
   setupMobileFilters();
   setupSyncPanel();
+  setupSettingsModal();
 
   // Clear any stale sync status on fresh page load
   // The status will be updated if there's an active sync via messages
@@ -164,8 +436,10 @@ function initializeEventListeners() {
   // Desktop filters
   const sortSelect = document.getElementById('sort-select');
   const typeFilter = document.getElementById('type-filter');
+  const randomRefreshBtn = document.getElementById('random-refresh-btn');
   if (sortSelect) sortSelect.addEventListener('change', handleSortChange);
   if (typeFilter) typeFilter.addEventListener('change', handleTypeFilterChange);
+  if (randomRefreshBtn) randomRefreshBtn.addEventListener('click', handleRandomReshuffle);
 
   // Mobile search
   const searchInputMobile = document.getElementById('search-input-mobile');
@@ -176,8 +450,10 @@ function initializeEventListeners() {
   // Mobile filters
   const sortSelectMobile = document.getElementById('sort-select-mobile');
   const typeFilterMobile = document.getElementById('type-filter-mobile');
+  const randomRefreshBtnMobile = document.getElementById('random-refresh-btn-mobile');
   if (sortSelectMobile) sortSelectMobile.addEventListener('change', handleSortChangeMobile);
   if (typeFilterMobile) typeFilterMobile.addEventListener('change', handleTypeFilterChangeMobile);
+  if (randomRefreshBtnMobile) randomRefreshBtnMobile.addEventListener('click', handleRandomReshuffle);
 
   // Sync button - now opens sync panel
   const syncBtn = document.getElementById('sync-btn');
@@ -190,9 +466,23 @@ function initializeEventListeners() {
   });
   document.getElementById('modal-prev').addEventListener('click', () => navigateModal(-1));
   document.getElementById('modal-next').addEventListener('click', () => navigateModal(1));
+  const downloadBtn = document.getElementById('modal-download-btn');
+  const collectionBtn = document.getElementById('modal-collection-btn');
+  const autoplayBtn = document.getElementById('modal-autoplay-btn');
+  if (downloadBtn) downloadBtn.addEventListener('click', downloadCurrentMedia);
+  if (collectionBtn) collectionBtn.addEventListener('click', addCurrentPostToCollection);
+  if (autoplayBtn) autoplayBtn.addEventListener('click', toggleModalAutoplay);
 
   // Keyboard navigation
   document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      const settingsModal = document.getElementById('settings-modal');
+      if (settingsModal && settingsModal.classList.contains('active')) {
+        closeSettingsModal();
+        return;
+      }
+    }
+
     if (e.key === 'Escape' && currentModalIndex >= 0) {
       closeModal();
     }
@@ -230,9 +520,7 @@ function setupMobileFilters() {
 
 // Load posts with pagination from background
 function loadPosts(append = false, fetchHashtagsAfter = false) {
-  if (isLoading) return;
-
-  isLoading = true;
+  const requestId = ++latestLoadRequestId;
   showLoadingState();
 
   chrome.runtime.sendMessage({
@@ -242,14 +530,18 @@ function loadPosts(append = false, fetchHashtagsAfter = false) {
     sortBy: currentSort,
     filterType: currentTypeFilter,
     searchQuery: currentSearchQuery,
-    hashtagFilter: currentHashtagFilter
+    hashtagFilter: currentHashtagFilter,
+    randomSeed: currentSort === 'random' ? currentRandomSeed : null
   }, (response) => {
-    isLoading = false;
+    if (requestId !== latestLoadRequestId) {
+      return;
+    }
+
     hideLoadingState();
 
     if (chrome.runtime.lastError) {
       console.error('Error loading posts:', chrome.runtime.lastError);
-      showError('Failed to load posts');
+      showError(t('loadPostsFailed'));
       return;
     }
 
@@ -265,11 +557,6 @@ function loadPosts(append = false, fetchHashtagsAfter = false) {
       applyLocalFilters();
       renderPagination();
 
-      // Show hashtags from current page immediately (fallback)
-      if (allHashtagsCache.length === 0 && allPosts.length > 0) {
-        updateHashtagsFromCurrentPosts();
-      }
-
       // Fetch hashtags after posts are loaded (service worker is ready)
       if (fetchHashtagsAfter) {
         scheduleFetchAllHashtags();
@@ -278,7 +565,7 @@ function loadPosts(append = false, fetchHashtagsAfter = false) {
         scheduleFetchAllHashtags();
       }
     } else {
-      showError('No posts found. Click "Sync Posts" to import your Instagram saved posts.');
+      showError(t('noPostsFoundSync'));
       allPosts = [];
       totalPosts = 0;
       renderPosts();
@@ -294,6 +581,7 @@ function loadPosts(append = false, fetchHashtagsAfter = false) {
 // Show loading state
 function showLoadingState() {
   const container = document.getElementById('posts-container');
+  if (!container) return;
 
   if (container.children.length === 0) {
     container.innerHTML = '';
@@ -317,6 +605,24 @@ function hideLoadingState() {
   skeletons.forEach(s => s.remove());
 }
 
+function updateRandomControlsVisibility() {
+  const isRandomSort = currentSort === 'random';
+  [
+    document.getElementById('random-refresh-btn'),
+    document.getElementById('random-refresh-btn-mobile')
+  ].filter(Boolean).forEach((button) => {
+    button.classList.toggle('visible', isRandomSort);
+  });
+}
+
+function handleRandomReshuffle() {
+  if (currentSort !== 'random') return;
+
+  currentRandomSeed = Date.now();
+  currentPage = 1;
+  loadPosts();
+}
+
 // Message listener for live updates
 function setupMessageListener() {
   chrome.runtime.onMessage.addListener((request) => {
@@ -333,6 +639,8 @@ function setupMessageListener() {
       currentPage = 1;
       loadPosts();
       scheduleFetchAllHashtags(); // Refresh hashtags after sync (debounced)
+    } else if (request.action === 'SYNC_LOGIN_REQUIRED') {
+      handleSyncLoginRequired(request.error || 'Instagram login required.');
     } else if (request.action === 'IMPORT_FAILED') {
       handleSyncError(request.error || 'Sync failed. Please try again.');
     } else if (request.action === 'SYNC_STOPPED') {
@@ -364,6 +672,12 @@ function handleSearchMobile(e) {
 // Sort handlers
 function handleSortChange(e) {
   currentSort = e.target.value;
+  if (currentSort === 'random') {
+    currentRandomSeed = Date.now();
+  } else {
+    currentRandomSeed = null;
+  }
+  updateRandomControlsVisibility();
   // Sync with mobile
   const mobileSelect = document.getElementById('sort-select-mobile');
   if (mobileSelect) mobileSelect.value = e.target.value;
@@ -373,6 +687,12 @@ function handleSortChange(e) {
 
 function handleSortChangeMobile(e) {
   currentSort = e.target.value;
+  if (currentSort === 'random') {
+    currentRandomSeed = Date.now();
+  } else {
+    currentRandomSeed = null;
+  }
+  updateRandomControlsVisibility();
   // Sync with desktop
   const desktopSelect = document.getElementById('sort-select');
   if (desktopSelect) desktopSelect.value = e.target.value;
@@ -428,45 +748,46 @@ function extractHashtags(text) {
 
 // Cache for all hashtags from database
 let allHashtagsCache = [];
+let isFetchingHashtags = false;
 // Keep last rendered hashtag snapshot to avoid unnecessary DOM updates
 let lastRenderedHashtags = '';
 
 // Fetch all hashtags from database
-function fetchAllHashtags() {
+function fetchAllHashtags(retryCount = 0) {
+  isFetchingHashtags = true;
+  updateHashtagChips();
+
   chrome.runtime.sendMessage({ action: 'GET_ALL_HASHTAGS' }, (response) => {
     if (chrome.runtime.lastError) {
       console.error('Error fetching hashtags:', chrome.runtime.lastError);
-      // Fallback: use hashtags from current page posts
-      updateHashtagsFromCurrentPosts();
+      if (retryCount < 2) {
+        setTimeout(() => fetchAllHashtags(retryCount + 1), 400 * (retryCount + 1));
+        return;
+      }
+
+      isFetchingHashtags = false;
+      updateHashtagChips();
       return;
     }
 
     if (response && response.success && Array.isArray(response.hashtags)) {
+      isFetchingHashtags = false;
       allHashtagsCache = response.hashtags;
       updateHashtagChips();
     } else if (response && Array.isArray(response.hashtags)) {
+      isFetchingHashtags = false;
       allHashtagsCache = response.hashtags;
       updateHashtagChips();
     } else {
-      // Fallback: use hashtags from current page posts
-      updateHashtagsFromCurrentPosts();
+      if (retryCount < 2) {
+        setTimeout(() => fetchAllHashtags(retryCount + 1), 400 * (retryCount + 1));
+        return;
+      }
+
+      isFetchingHashtags = false;
+      updateHashtagChips();
     }
   });
-}
-
-// Fallback: extract hashtags from currently loaded posts
-function updateHashtagsFromCurrentPosts() {
-  const hashtagCounts = new Map();
-  allPosts.forEach(post => {
-    const caption = post.title || '';
-    extractHashtags(caption).forEach(tag => {
-      hashtagCounts.set(tag, (hashtagCounts.get(tag) || 0) + 1);
-    });
-  });
-  allHashtagsCache = Array.from(hashtagCounts.entries())
-    .map(([tag, count]) => ({ tag, count }))
-    .sort((a, b) => b.count - a.count);
-  updateHashtagChips();
 }
 
 // Get hashtags with counts (uses cached data from database)
@@ -491,15 +812,20 @@ function updateHashtagChips() {
   }
 
   // Serialize current hashtags for quick diffing to avoid re-rendering
-  const serialized = (hashtagsWithCounts || []).slice(0, 25).map(h => `${h.tag}:${h.count}`).join(',');
+  const serialized = `${isFetchingHashtags ? 'loading' : 'ready'}:${(hashtagsWithCounts || []).slice(0, 25).map(h => `${h.tag}:${h.count}`).join(',')}`;
   if (serialized === lastRenderedHashtags) return; // No change, skip DOM updates
   lastRenderedHashtags = serialized;
 
   containers.forEach(container => {
     container.innerHTML = '';
 
+    if (isFetchingHashtags && hashtagsWithCounts.length === 0) {
+      container.innerHTML = `<span class="no-hashtags">${t('loadingHashtags')}</span>`;
+      return;
+    }
+
     if (hashtagsWithCounts.length === 0) {
-      container.innerHTML = '<span class="no-hashtags">No hashtags found</span>';
+      container.innerHTML = `<span class="no-hashtags">${t('noHashtagsFound')}</span>`;
       return;
     }
 
@@ -597,7 +923,7 @@ function renderPagination() {
 
   // Next button
   const nextBtn = document.createElement('button');
-  nextBtn.innerHTML = 'Next →';
+  nextBtn.textContent = t('nextPage');
   nextBtn.disabled = currentPage === totalPages;
   nextBtn.addEventListener('click', () => {
     if (currentPage < totalPages) {
@@ -614,13 +940,28 @@ function renderPosts() {
   const container = document.getElementById('posts-container');
 
   if (displayedPosts.length === 0) {
-    container.innerHTML = `
-      <div class="empty-state">
-        <div class="empty-icon">📸</div>
-        <p>No posts found${currentSearchQuery ? ` matching "${currentSearchQuery}"` : ''}</p>
-        <p class="empty-hint">Try adjusting your filters or sync more posts</p>
-      </div>
-    `;
+    const emptyState = document.createElement('div');
+    emptyState.className = 'empty-state';
+
+    const icon = document.createElement('div');
+    icon.className = 'empty-icon';
+    icon.textContent = '📸';
+
+    const title = document.createElement('p');
+    title.textContent = currentSearchQuery
+      ? t('noPostsFoundMatching', { query: currentSearchQuery })
+      : t('noPostsFound');
+
+    const hint = document.createElement('p');
+    hint.className = 'empty-hint';
+    hint.textContent = t('emptyHintAdjustFilters');
+
+    emptyState.appendChild(icon);
+    emptyState.appendChild(title);
+    emptyState.appendChild(hint);
+
+    container.innerHTML = '';
+    container.appendChild(emptyState);
     return;
   }
 
@@ -733,6 +1074,241 @@ function truncateText(text, maxLength) {
   return text.substring(0, maxLength) + '...';
 }
 
+function getCurrentModalPost() {
+  if (currentModalIndex < 0 || currentModalIndex >= displayedPosts.length) return null;
+  return displayedPosts[currentModalIndex] || null;
+}
+
+function getModalCacheKey(post, carouselIndex = null) {
+  return carouselIndex === null ? `${post.id}:primary` : `${post.id}:carousel:${carouselIndex}`;
+}
+
+function cacheModalMedia(cacheKey, media) {
+  if (!cacheKey || !media || !media.url) return;
+
+  if (modalMediaCache.has(cacheKey)) {
+    modalMediaCache.delete(cacheKey);
+  }
+
+  modalMediaCache.set(cacheKey, media);
+
+  if (modalMediaCache.size > MODAL_MEDIA_CACHE_MAX_ENTRIES) {
+    const oldestKey = modalMediaCache.keys().next().value;
+    if (oldestKey) {
+      modalMediaCache.delete(oldestKey);
+    }
+  }
+}
+
+function setModalVideoLayoutClass(target, aspectRatio = null) {
+  if (!target) return;
+
+  target.classList.remove('portrait', 'square', 'landscape');
+
+  if (typeof aspectRatio !== 'number' || !Number.isFinite(aspectRatio)) {
+    target.classList.add('portrait');
+    return;
+  }
+
+  if (aspectRatio < 0.7) {
+    target.classList.add('portrait');
+  } else if (aspectRatio <= 1.3) {
+    target.classList.add('square');
+  } else {
+    target.classList.add('landscape');
+  }
+}
+
+function createModalVideoShell(posterUrl = '') {
+  const shell = document.createElement('div');
+  shell.className = 'modal-video-shell portrait';
+
+  const loading = document.createElement('div');
+  loading.className = 'loading-video';
+  if (posterUrl) {
+    loading.style.backgroundImage = `url('${posterUrl}')`;
+  }
+  loading.innerHTML = `
+    <div class="spinner"></div>
+    <p>Loading video...</p>
+  `;
+
+  shell.appendChild(loading);
+  return shell;
+}
+
+function updateModalActionState(buttonId, label, disabled = false) {
+  const button = document.getElementById(buttonId);
+  if (!button) return;
+  button.textContent = label;
+  button.disabled = disabled;
+}
+
+/**
+ * @param {NostalgiaPost | null} post
+ * @returns {{ isVideo: boolean, url: string | null, extension: string } | null}
+ */
+function getPrimaryMediaForPost(post) {
+  if (!post) return null;
+
+  if (post.isCarousel && post.carouselMedia && post.carouselMedia.length > 0) {
+    const item = post.carouselMedia[currentCarouselIndex] || post.carouselMedia[0];
+    const cacheKey = getModalCacheKey(post, currentCarouselIndex);
+    const cachedMedia = modalMediaCache.get(cacheKey);
+
+    return {
+      isVideo: !!item?.isVideo,
+      url: item?.isVideo ? (cachedMedia?.url || null) : (item?.imageUrl || null),
+      extension: item?.isVideo ? 'mp4' : 'jpg'
+    };
+  }
+
+  if (post.isVideo) {
+    return {
+      isVideo: true,
+      url: currentModalVideoUrl,
+      extension: 'mp4'
+    };
+  }
+
+  return {
+    isVideo: false,
+    url: post.image || post.thumbnail || null,
+    extension: 'jpg'
+  };
+}
+
+function buildDownloadFilename(post, media) {
+  const username = (post.username || 'instagram').replace(/[^a-z0-9_-]+/gi, '-').toLowerCase();
+  const baseId = (post.id || 'media').replace(/[^a-z0-9_-]+/gi, '-').toLowerCase();
+  return `nostalgia/${username}-${baseId}.${media.extension || 'bin'}`;
+}
+
+function downloadCurrentMedia() {
+  const post = getCurrentModalPost();
+  if (!post) return;
+
+  const media = getPrimaryMediaForPost(post);
+  if (!media?.url) {
+    updateModalActionState('modal-download-btn', t('mediaNotReady'), true);
+    setTimeout(() => updateModalActionState('modal-download-btn', t('downloadMedia')), 1800);
+    return;
+  }
+
+  updateModalActionState('modal-download-btn', t('downloadPreparing'), true);
+  chrome.runtime.sendMessage({
+    action: 'DOWNLOAD_MEDIA',
+    url: media.url,
+    filename: buildDownloadFilename(post, media)
+  }, (response) => {
+    if (response && response.success) {
+      updateModalActionState('modal-download-btn', t('downloadStarted'));
+    } else {
+      updateModalActionState('modal-download-btn', response?.error || t('downloadFailed'));
+    }
+
+    setTimeout(() => updateModalActionState('modal-download-btn', t('downloadMedia')), 1800);
+  });
+}
+
+function addCurrentPostToCollection() {
+  const post = getCurrentModalPost();
+  if (!post) return;
+
+  updateModalActionState('modal-collection-btn', t('savingToInstagram'), true);
+  chrome.runtime.sendMessage({
+    action: 'ADD_POST_TO_NOSTALGIA_COLLECTION',
+    post: {
+      id: post.id,
+      link: post.link,
+      title: post.title,
+      username: post.username
+    }
+  }, (response) => {
+    if (response && response.success) {
+      updateModalActionState('modal-collection-btn', response.message || t('savedToNostalgia'));
+    } else {
+      updateModalActionState('modal-collection-btn', response?.error || t('saveFailed'));
+    }
+
+    setTimeout(() => updateModalActionState('modal-collection-btn', t('addToCollection')), 2200);
+  });
+}
+
+function preloadPrimaryVideo(post) {
+  if (!post || !post.isVideo || !post.link) return;
+
+  const cacheKey = getModalCacheKey(post);
+  if (modalMediaCache.has(cacheKey)) return;
+
+  chrome.runtime.sendMessage({
+    action: 'FETCH_VIDEO_CDN',
+    permalink: post.link,
+    postId: post.id
+  }, (response) => {
+    if (response && response.success && response.videoUrl) {
+      cacheModalMedia(cacheKey, { isVideo: true, url: response.videoUrl, extension: 'mp4' });
+    }
+  });
+}
+
+function preloadCarouselVideo(post, idx) {
+  if (!post || !post.carouselMedia || idx < 0 || idx >= post.carouselMedia.length) return;
+
+  const item = post.carouselMedia[idx];
+  if (!item?.isVideo || !post.link) return;
+
+  const cacheKey = getModalCacheKey(post, idx);
+  if (modalMediaCache.has(cacheKey)) return;
+
+  chrome.runtime.sendMessage({
+    action: 'FETCH_CAROUSEL_VIDEO',
+    permalink: post.link,
+    postId: post.id,
+    carouselIndex: idx
+  }, (response) => {
+    if (response && response.success && response.videoUrl) {
+      cacheModalMedia(cacheKey, { isVideo: true, url: response.videoUrl, extension: 'mp4' });
+    }
+  });
+}
+
+function preloadUpcomingModalMedia(index = currentModalIndex) {
+  if (!currentAutoplayEnabled) return;
+
+  const nextPost = displayedPosts[index + 1];
+  if (!nextPost) return;
+
+  if (nextPost.isCarousel && nextPost.carouselMedia && nextPost.carouselMedia.length > 0) {
+    preloadCarouselVideo(nextPost, 0);
+    return;
+  }
+
+  preloadPrimaryVideo(nextPost);
+}
+
+function attachVideoAutoplay(video, onAdvance = null) {
+  if (!video) return;
+
+  video.addEventListener('playing', () => {
+    if (currentAutoplayEnabled) {
+      preloadUpcomingModalMedia();
+    }
+  });
+
+  video.addEventListener('ended', () => {
+    if (!currentAutoplayEnabled) {
+      return;
+    }
+
+    if (typeof onAdvance === 'function') {
+      onAdvance();
+    } else {
+      navigateModal(1);
+    }
+  });
+}
+
 // Open modal
 function openModal(index, carouselIdx = 0) {
   if (index < 0 || index >= displayedPosts.length) return;
@@ -752,6 +1328,7 @@ function openModal(index, carouselIdx = 0) {
 
   currentModalIndex = index;
   currentCarouselIndex = carouselIdx;
+  currentModalVideoUrl = null;
   const post = displayedPosts[index];
 
   if (!post) return;
@@ -760,6 +1337,9 @@ function openModal(index, carouselIdx = 0) {
   const captionEl = document.getElementById('modal-caption');
   const usernameEl = document.getElementById('modal-username');
   const linkEl = document.getElementById('modal-link');
+  const autoplayBtn = document.getElementById('modal-autoplay-btn');
+  const downloadBtn = document.getElementById('modal-download-btn');
+  const collectionBtn = document.getElementById('modal-collection-btn');
   const hashtagsEl = document.getElementById('modal-hashtags');
 
   mediaContainer.innerHTML = '';
@@ -773,12 +1353,28 @@ function openModal(index, carouselIdx = 0) {
     renderImageModal(post, mediaContainer);
   }
 
-  titleEl.textContent = post.username ? `@${post.username}` : 'Post';
+  titleEl.textContent = post.username ? `@${post.username}` : t('postFallbackTitle');
   captionEl.textContent = post.title || '';
-  usernameEl.textContent = `@${post.username || 'unknown'}`;
+  usernameEl.textContent = `@${post.username || t('unknownUser')}`;
 
   linkEl.style.display = post.link ? '' : 'none';
   linkEl.href = post.link || '#';
+
+  if (downloadBtn) {
+    downloadBtn.disabled = false;
+    downloadBtn.textContent = t('downloadMedia');
+  }
+
+  if (autoplayBtn) {
+    autoplayBtn.disabled = false;
+  }
+
+  if (collectionBtn) {
+    collectionBtn.disabled = false;
+    collectionBtn.textContent = t('addToCollection');
+  }
+
+  updateModalAutoplayButton(post);
 
   const hashtags = extractHashtags(post.title || '');
   hashtagsEl.innerHTML = '';
@@ -793,6 +1389,8 @@ function openModal(index, carouselIdx = 0) {
 
   modal.classList.add('active');
   document.body.style.overflow = 'hidden';
+
+  preloadUpcomingModalMedia(index);
 }
 
 // Render carousel in modal
@@ -820,7 +1418,7 @@ function renderCarouselModal(post, container, startIndex = 0) {
       slide.innerHTML = `
         <div class="loading-video" ${bgStyle}>
           <div class="spinner"></div>
-          <p>Loading video...</p>
+          <p>${t('loadingVideo')}</p>
         </div>
       `;
       // We'll load video content when the slide becomes active
@@ -889,6 +1487,44 @@ function loadCarouselSlide(idx, post) {
   // Check if already loaded
   if (slide.dataset.loaded === 'true') return;
 
+  const cacheKey = getModalCacheKey(post, idx);
+  const cachedMedia = modalMediaCache.get(cacheKey);
+
+  if (item.isVideo && cachedMedia?.url) {
+    const video = createVideoElement(cachedMedia.url);
+    video.controls = true;
+    video.className = 'modal-video';
+    video.crossOrigin = 'anonymous';
+
+    video.addEventListener('loadedmetadata', () => {
+      const aspectRatio = video.videoWidth / video.videoHeight;
+      video.classList.remove('portrait', 'square', 'landscape');
+      if (aspectRatio < 0.7) video.classList.add('portrait');
+      else if (aspectRatio >= 0.7 && aspectRatio <= 1.3) video.classList.add('square');
+      else video.classList.add('landscape');
+    });
+
+    attachVideoAutoplay(video, () => {
+      const nextIdx = idx + 1;
+      if (nextIdx < items.length) {
+        goToCarouselSlide(nextIdx, post);
+      } else {
+        navigateModal(1);
+      }
+    });
+
+    slide.innerHTML = '';
+    slide.appendChild(video);
+    slide.dataset.loaded = 'true';
+
+    if (idx === currentCarouselIndex && currentAutoplayEnabled) {
+      video.play().catch(() => { });
+    }
+
+    preloadCarouselVideo(post, idx + 1);
+    return;
+  }
+
   if (item.isVideo) {
     // Fetch video from Instagram
     chrome.runtime.sendMessage({
@@ -898,6 +1534,7 @@ function loadCarouselSlide(idx, post) {
       carouselIndex: idx
     }, (response) => {
       if (response && response.success && response.videoUrl) {
+        cacheModalMedia(cacheKey, { isVideo: true, url: response.videoUrl, extension: 'mp4' });
         const video = createVideoElement(response.videoUrl);
         video.controls = true;
         video.className = 'modal-video';
@@ -915,10 +1552,21 @@ function loadCarouselSlide(idx, post) {
         slide.appendChild(video);
         slide.dataset.loaded = 'true';
 
+        attachVideoAutoplay(video, () => {
+          const nextIdx = idx + 1;
+          if (nextIdx < items.length) {
+            goToCarouselSlide(nextIdx, post);
+          } else {
+            navigateModal(1);
+          }
+        });
+
         // Auto-play if this is the current slide
-        if (idx === currentCarouselIndex) {
+        if (idx === currentCarouselIndex && currentAutoplayEnabled) {
           video.play().catch(() => { });
         }
+
+        preloadCarouselVideo(post, idx + 1);
       } else {
         // Fallback: show image thumbnail
         if (item.imageUrl) {
@@ -931,10 +1579,10 @@ function loadCarouselSlide(idx, post) {
 
           const playOverlay = document.createElement('div');
           playOverlay.className = 'video-play-overlay';
-          playOverlay.innerHTML = '<span>▶</span> Video unavailable';
+          playOverlay.innerHTML = `<span>▶</span> ${t('videoUnavailable')}`;
           slide.appendChild(playOverlay);
         } else {
-          slide.innerHTML = '<p class="error-message">Video failed to load</p>';
+          slide.innerHTML = `<p class="error-message">${t('failedToLoadVideo')}</p>`;
         }
         slide.dataset.loaded = 'true';
       }
@@ -945,19 +1593,19 @@ function loadCarouselSlide(idx, post) {
     if (imageUrl) {
       const img = document.createElement('img');
       img.className = 'modal-image';
-      img.alt = 'Instagram post';
+      img.alt = t('postFallbackTitle');
       img.onload = () => {
         slide.dataset.loaded = 'true';
       };
       img.onerror = () => {
-        slide.innerHTML = '<p class="error-message">Image failed to load</p>';
+        slide.innerHTML = `<p class="error-message">${t('imageFailedToLoad')}</p>`;
         slide.dataset.loaded = 'true';
       };
       img.src = imageUrl;
       slide.innerHTML = '';
       slide.appendChild(img);
     } else {
-      slide.innerHTML = '<p class="no-media">Image not available</p>';
+      slide.innerHTML = `<p class="no-media">${t('imageNotAvailable')}</p>`;
       slide.dataset.loaded = 'true';
     }
   }
@@ -1009,12 +1657,15 @@ function goToCarouselSlide(idx, post) {
 
   // Load the new slide content if not already loaded
   loadCarouselSlide(idx, post);
+  if (currentAutoplayEnabled) {
+    preloadCarouselVideo(post, idx + 1);
+  }
 
   // Play video if the new slide has one
   const newSlide = slides[idx];
   if (newSlide) {
     const video = newSlide.querySelector('video');
-    if (video) {
+    if (video && currentAutoplayEnabled) {
       video.play().catch(() => { });
     }
   }
@@ -1022,18 +1673,52 @@ function goToCarouselSlide(idx, post) {
 
 // Render single video in modal
 function renderVideoModal(post, container) {
-  const imgSrc = post.image || post.thumbnail;
-  const bgStyle = imgSrc ? `style="background-image: url('${imgSrc}')"` : '';
+  const posterUrl = post.image || post.thumbnail || '';
+  const videoShell = createModalVideoShell(posterUrl);
 
-  container.innerHTML = `
-    <div class="loading-video" ${bgStyle}>
-      <div class="spinner"></div>
-      <p>Loading video...</p>
-    </div>
-  `;
+  container.innerHTML = '';
+  container.appendChild(videoShell);
 
   if (!post.link) {
-    container.innerHTML = '<p class="error-message">Post has no link</p>';
+    container.innerHTML = `<p class="error-message">${t('postHasNoLink')}</p>`;
+    return;
+  }
+
+  const cacheKey = getModalCacheKey(post);
+  const cachedMedia = modalMediaCache.get(cacheKey);
+
+  const applyVideoToContainer = (videoUrl) => {
+    currentModalVideoUrl = videoUrl;
+    cacheModalMedia(cacheKey, { isVideo: true, url: videoUrl, extension: 'mp4' });
+
+    const video = createVideoElement(videoUrl);
+    video.controls = true;
+    video.autoplay = currentAutoplayEnabled;
+    video.className = 'modal-video portrait';
+    videoShell.innerHTML = '';
+    videoShell.appendChild(video);
+    container.innerHTML = '';
+    container.appendChild(videoShell);
+
+    video.addEventListener('loadedmetadata', () => {
+      const aspectRatio = video.videoWidth / video.videoHeight;
+      setModalVideoLayoutClass(video, aspectRatio);
+      setModalVideoLayoutClass(videoShell, aspectRatio);
+    });
+
+    attachVideoAutoplay(video);
+
+    video.addEventListener('loadeddata', () => {
+      if (currentAutoplayEnabled) {
+        video.play().catch(() => { });
+      }
+    });
+
+    preloadUpcomingModalMedia();
+  };
+
+  if (cachedMedia?.url) {
+    applyVideoToContainer(cachedMedia.url);
     return;
   }
 
@@ -1043,36 +1728,14 @@ function renderVideoModal(post, container) {
     postId: post.id
   }, (response) => {
     if (chrome.runtime.lastError) {
-      container.innerHTML = '<p class="error-message">Failed to load video</p>';
+      container.innerHTML = `<p class="error-message">${t('failedToLoadVideo')}</p>`;
       return;
     }
 
     if (response && response.success && response.videoUrl) {
-      const video = createVideoElement(response.videoUrl);
-      video.controls = true;
-      video.autoplay = true;
-      video.className = 'modal-video';
-      container.innerHTML = '';
-      container.appendChild(video);
-
-      video.addEventListener('loadedmetadata', () => {
-        const aspectRatio = video.videoWidth / video.videoHeight;
-        video.classList.remove('portrait', 'square', 'landscape');
-
-        if (aspectRatio < 0.7) {
-          video.classList.add('portrait');
-        } else if (aspectRatio >= 0.7 && aspectRatio <= 1.3) {
-          video.classList.add('square');
-        } else {
-          video.classList.add('landscape');
-        }
-      });
-
-      video.addEventListener('loadeddata', () => {
-        video.play().catch(() => { });
-      });
+      applyVideoToContainer(response.videoUrl);
     } else {
-      container.innerHTML = `<p class="error-message">Failed to load video: ${response?.error || 'Unknown error'}</p>`;
+      container.innerHTML = `<p class="error-message">${t('failedToLoadVideoWithReason', { error: response?.error || t('unknownError') })}</p>`;
     }
   });
 }
@@ -1084,10 +1747,10 @@ function renderImageModal(post, container) {
   if (imgSrc && typeof imgSrc === 'string') {
     const img = document.createElement('img');
     img.src = imgSrc;
-    img.alt = post.title || 'Instagram post';
+    img.alt = post.title || t('postFallbackTitle');
     img.className = 'modal-image';
     img.onerror = () => {
-      container.innerHTML = '<p class="error-message">Image failed to load</p>';
+      container.innerHTML = `<p class="error-message">${t('imageFailedToLoad')}</p>`;
     };
     container.appendChild(img);
 
@@ -1102,13 +1765,14 @@ function renderImageModal(post, container) {
           const fullResImg = new Image();
           fullResImg.onload = () => {
             img.src = response.imageUrl;
+            cacheModalMedia(getModalCacheKey(post), { isVideo: false, url: response.imageUrl, extension: 'jpg' });
           };
           fullResImg.src = response.imageUrl;
         }
       });
     }
   } else {
-    container.innerHTML = '<p class="no-media">Image not available</p>';
+    container.innerHTML = `<p class="no-media">${t('imageNotAvailable')}</p>`;
   }
 }
 
@@ -1124,11 +1788,15 @@ function closeModal() {
       video.currentTime = 0;
       video.src = '';
     });
+
+    mediaContainer.innerHTML = '';
   }
 
   modal.classList.remove('active');
   document.body.style.overflow = '';
   currentModalIndex = -1;
+  currentCarouselIndex = 0;
+  currentModalVideoUrl = null;
 }
 
 // Navigate modal
@@ -1145,12 +1813,12 @@ function updateStats() {
   const endIndex = Math.min(startIndex + displayedPosts.length, totalPosts);
 
   document.getElementById('filtered-count').textContent = totalPosts > 0
-    ? `Showing ${startIndex + 1}–${endIndex} of ${totalPosts}`
-    : 'No posts';
+    ? t('showingRangeOfTotal', { start: startIndex + 1, end: endIndex, total: totalPosts })
+    : t('noPosts');
 
   const totalPages = Math.ceil(totalPosts / postsPerPage);
   document.getElementById('page-info').textContent = totalPages > 0
-    ? `Page ${currentPage} of ${totalPages}`
+    ? t('pageOf', { page: currentPage, totalPages })
     : '';
 
   updateHashtagChips();
@@ -1216,12 +1884,7 @@ function restoreSyncingState() {
 
   if (startBtn) {
     startBtn.disabled = true;
-    startBtn.innerHTML = `
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18" class="spin">
-        <circle cx="12" cy="12" r="10"/>
-      </svg>
-      Syncing...
-    `;
+    startBtn.innerHTML = buildButtonMarkup(t('syncing'), getSpinnerIconMarkup());
     startBtn.classList.add('syncing');
   }
   if (stopBtn) stopBtn.style.display = 'block';
@@ -1249,28 +1912,17 @@ function checkSyncProgress() {
       const progress = result.instagram_sync_progress;
       if (resumeInfo) {
         resumeInfo.style.display = 'flex';
-        const totalText = (typeof progress.total === 'number' && progress.total > 0) ? ` of ${progress.total}` : '';
-        resumeDetails.textContent = `${progress.synced} synced, ${progress.failed} failed${totalText}`;
+        resumeDetails.textContent = getResumeDetailsText(progress);
       }
       if (startBtn) {
-        startBtn.innerHTML = `
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
-            <polygon points="5 3 19 12 5 21 5 3"/>
-          </svg>
-          Resume Sync
-        `;
+        startBtn.innerHTML = buildButtonMarkup(t('resumeSync'), getPlayIconMarkup());
       }
       // Update stats display
       updateSyncPanelProgress(progress.synced, progress.failed, progress.total);
     } else {
       if (resumeInfo) resumeInfo.style.display = 'none';
       if (startBtn) {
-        startBtn.innerHTML = `
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
-            <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0118.8-4.3M22 12.5a10 10 0 01-18.8 4.3"/>
-          </svg>
-          Start Sync
-        `;
+        startBtn.innerHTML = buildButtonMarkup(t('startSync'), getSyncIconMarkup());
       }
     }
   });
@@ -1288,19 +1940,14 @@ function clearSyncProgress() {
 }
 
 function clearAllData() {
-  if (!confirm('Are you sure you want to delete ALL synced posts? This cannot be undone.')) {
+  if (!confirm(t('clearAllConfirm'))) {
     return;
   }
 
   const btn = document.getElementById('clear-all-data-btn');
   if (btn) {
     btn.disabled = true;
-    btn.innerHTML = `
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" class="spin">
-        <circle cx="12" cy="12" r="10"/>
-      </svg>
-      Clearing...
-    `;
+    btn.innerHTML = buildButtonMarkup(t('clearing'), getSpinnerIconMarkup(16));
   }
 
   chrome.runtime.sendMessage({ action: 'CLEAR_ALL_POSTS' }, (response) => {
@@ -1332,15 +1979,7 @@ function clearAllData() {
 
     if (btn) {
       btn.disabled = false;
-      btn.innerHTML = `
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-          <polyline points="3 6 5 6 21 6"/>
-          <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/>
-          <line x1="10" y1="11" x2="10" y2="17"/>
-          <line x1="14" y1="11" x2="14" y2="17"/>
-        </svg>
-        Clear All Data
-      `;
+      btn.innerHTML = buildButtonMarkup(t('clearAllData'), getTrashIconMarkup());
     }
 
     // Clear sync status
@@ -1358,12 +1997,7 @@ function startSync() {
 
   if (startBtn) {
     startBtn.disabled = true;
-    startBtn.innerHTML = `
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18" class="spin">
-        <circle cx="12" cy="12" r="10"/>
-      </svg>
-      Syncing...
-    `;
+    startBtn.innerHTML = buildButtonMarkup(t('syncing'), getSpinnerIconMarkup());
     startBtn.classList.add('syncing');
   }
   if (stopBtn) stopBtn.style.display = 'block';
@@ -1377,7 +2011,7 @@ function startSync() {
   chrome.runtime.sendMessage({ action: 'SYNC_WITH_INSTAGRAM_BACKGROUND' });
 
   // Sync runs in a background tab
-  updateSyncStatus('syncing', 'Syncing...');
+  updateLocalizedSyncStatus('syncing', 'syncing');
 }
 
 function stopSync() {
@@ -1385,13 +2019,13 @@ function stopSync() {
   const stopBtn = document.getElementById('sync-stop-btn');
   if (stopBtn) {
     stopBtn.disabled = true;
-    stopBtn.textContent = 'Stopping...';
+    stopBtn.textContent = t('stopping');
   }
 }
 
 function handleSyncStarted() {
   document.getElementById('sync-progress-bar').style.width = '10%';
-  updateSyncStatus('syncing', 'Preparing...');
+  updateLocalizedSyncStatus('syncing', 'preparing');
 }
 
 function updateSyncPanelProgress(synced, failed, total = 0) {
@@ -1418,9 +2052,9 @@ function updateSyncPanelProgress(synced, failed, total = 0) {
   if (isSyncing) {
     if (total > 0) {
       const percent = Math.min(99, Math.round((processed / total) * 100));
-      updateSyncStatus('syncing', `Syncing... ${percent}%`);
+      updateLocalizedSyncStatus('syncing', 'syncStatusPercent', { percent });
     } else if (processed > 0) {
-      updateSyncStatus('syncing', 'Syncing...');
+      updateLocalizedSyncStatus('syncing', 'syncing');
     }
   }
 
@@ -1451,18 +2085,13 @@ function handleSyncComplete(syncedCount, failedCount) {
 
   if (startBtn) {
     startBtn.disabled = false;
-    startBtn.innerHTML = `
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
-        <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0118.8-4.3M22 12.5a10 10 0 01-18.8 4.3"/>
-      </svg>
-      Sync Again
-    `;
+    startBtn.innerHTML = buildButtonMarkup(t('syncAgain'), getSyncIconMarkup());
     startBtn.classList.remove('syncing');
   }
   if (stopBtn) {
     stopBtn.style.display = 'none';
     stopBtn.disabled = false;
-    stopBtn.textContent = 'Stop Sync';
+    stopBtn.textContent = t('stopSync');
   }
   if (completeSection) completeSection.style.display = 'block';
   if (headerBtn) headerBtn.classList.remove('syncing');
@@ -1486,18 +2115,13 @@ function handleSyncStopped(syncedCount, failedCount) {
 
   if (startBtn) {
     startBtn.disabled = false;
-    startBtn.innerHTML = `
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
-        <polygon points="5 3 19 12 5 21 5 3"/>
-      </svg>
-      Resume Sync
-    `;
+    startBtn.innerHTML = buildButtonMarkup(t('resumeSync'), getPlayIconMarkup());
     startBtn.classList.remove('syncing');
   }
   if (stopBtn) {
     stopBtn.style.display = 'none';
     stopBtn.disabled = false;
-    stopBtn.textContent = 'Stop Sync';
+    stopBtn.textContent = t('stopSync');
   }
   if (headerBtn) headerBtn.classList.remove('syncing');
 
@@ -1509,6 +2133,29 @@ function handleSyncStopped(syncedCount, failedCount) {
   updateSyncStatus('', '');
 }
 
+function handleSyncLoginRequired(error) {
+  isSyncing = false;
+  const startBtn = document.getElementById('sync-start-btn');
+  const stopBtn = document.getElementById('sync-stop-btn');
+  const headerBtn = document.getElementById('sync-btn');
+
+  if (startBtn) {
+    startBtn.disabled = false;
+    startBtn.innerHTML = buildButtonMarkup(t('retrySync'), getSyncIconMarkup());
+    startBtn.classList.remove('syncing');
+  }
+
+  if (stopBtn) {
+    stopBtn.style.display = 'none';
+    stopBtn.disabled = false;
+    stopBtn.textContent = t('stopSync');
+  }
+
+  if (headerBtn) headerBtn.classList.remove('syncing');
+
+  updateLocalizedSyncStatus('error', 'syncStatusLoginRequired', { error });
+}
+
 function handleSyncError(error) {
   isSyncing = false;
   const startBtn = document.getElementById('sync-start-btn');
@@ -1517,19 +2164,18 @@ function handleSyncError(error) {
 
   if (startBtn) {
     startBtn.disabled = false;
-    startBtn.innerHTML = `
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
-        <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0118.8-4.3M22 12.5a10 10 0 01-18.8 4.3"/>
-      </svg>
-      Retry Sync
-    `;
+    startBtn.innerHTML = buildButtonMarkup(t('retrySync'), getSyncIconMarkup());
     startBtn.classList.remove('syncing');
   }
-  if (stopBtn) stopBtn.style.display = 'none';
+  if (stopBtn) {
+    stopBtn.style.display = 'none';
+    stopBtn.disabled = false;
+    stopBtn.textContent = t('stopSync');
+  }
   if (headerBtn) headerBtn.classList.remove('syncing');
 
   // Show error in sync status
-  updateSyncStatus('error', `Error: ${error}`);
+  updateLocalizedSyncStatus('error', 'syncStatusError', { error });
 
   // Clear error after 5 seconds
   setTimeout(() => {
@@ -1559,20 +2205,28 @@ function updateSyncStatus(status, message) {
 // Show error
 function showError(message) {
   const container = document.getElementById('posts-container');
-  container.innerHTML = `
-    <div class="empty-state">
-      <div class="empty-icon">📭</div>
-      <p>${message}</p>
-      <button class="sync-btn-inline" id="error-sync-btn">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" width="18" height="18">
-          <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0118.8-4.3M22 12.5a10 10 0 01-18.8 4.3" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-        Sync Now
-      </button>
-    </div>
-  `;
-  // Attach event listener after DOM insertion
-  const syncBtn = document.getElementById('error-sync-btn');
+  container.innerHTML = '';
+
+  const emptyState = document.createElement('div');
+  emptyState.className = 'empty-state';
+
+  const icon = document.createElement('div');
+  icon.className = 'empty-icon';
+  icon.textContent = '📭';
+
+  const text = document.createElement('p');
+  text.textContent = message;
+
+  const syncBtn = document.createElement('button');
+  syncBtn.className = 'sync-btn-inline';
+  syncBtn.id = 'error-sync-btn';
+  syncBtn.innerHTML = buildButtonMarkup(t('syncNow'), getSyncIconMarkup());
+
+  emptyState.appendChild(icon);
+  emptyState.appendChild(text);
+  emptyState.appendChild(syncBtn);
+  container.appendChild(emptyState);
+
   if (syncBtn) {
     syncBtn.addEventListener('click', openSyncPanel);
   }

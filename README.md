@@ -2,16 +2,18 @@
 
 **nostalgia** - Your Instagram saved posts viewer
 
-A Chrome extension that lets you sync, view, and organize your Instagram saved posts with a beautiful Instagram-inspired interface.
+A Chrome and Edge extension that lets you sync, view, and organize your Instagram saved posts with a fast local viewer and an Instagram-inspired interface.
 
 ## Features
 
 - 🔄 **Sync Saved Posts**: Automatically sync all your Instagram saved posts
 - 📸 **Media Support**: View both images and videos
-- 🎨 **Instagram-Style UI**: Beautiful dark theme with Instagram gradient branding
+- 🎨 **Adaptive Themes**: Light and dark modes with Instagram-inspired branding
 - 🔍 **Search & Filter**: Search posts by caption, filter by type (photo/video)
+- 🎲 **Multiple Sort Modes**: Sort by newest saved, newest posted, alphabetical, or random with reshuffle
 - 📁 **Collections**: Organize posts into collections
 - 💾 **Offline Access**: All media stored locally in IndexedDB
+- 🌍 **Internationalized UI**: English, Spanish, Simplified Chinese, Hindi, and Arabic
 
 ## Installation
 
@@ -21,7 +23,7 @@ A Chrome extension that lets you sync, view, and organize your Instagram saved p
 2. Open Chrome and navigate to `chrome://extensions/`
 3. Enable "Developer mode" (toggle in top right)
 4. Click "Load unpacked"
-5. Select the `nostalgia` directory (or `dist` directory for production build)
+5. Select the `nostalgia` directory for development, or the `dist` directory after running a production build
 
 ### Building for Production
 
@@ -37,6 +39,14 @@ This will:
 
 The built extension will be in the `dist/` directory.
 
+To create a versioned zip package as well:
+
+```bash
+npm run package
+```
+
+This creates `nostalgia-v<version>.zip` in the project root.
+
 ## Usage
 
 1. **Open Instagram**: Navigate to `https://www.instagram.com`
@@ -51,19 +61,17 @@ The built extension will be in the `dist/` directory.
 
 ```
 nostalgia/
-├── background.js      # Service worker (handles sync, storage)
-├── contentScript.js   # Instagram page injection (sync drawer)
-├── app.js            # Main viewer application
-├── popup.js          # Extension popup
-├── styles.css        # Main styles
-├── theme.css         # Theme variables
-├── popup.css         # Popup styles
-├── index.html        # Viewer page
-├── popup.html        # Popup page
-├── manifest.json     # Extension manifest
-└── build.js          # Build script
-
-dist/                 # Production build output
+├── app.js             # Main viewer application
+├── background.js      # Service worker (sync, storage, pagination)
+├── contentScript.js   # Instagram page integration and sync UI
+├── index.html         # Viewer page
+├── styles.css         # Viewer styles
+├── manifest.json      # Extension manifest
+├── build.js           # Production build script
+├── INSTALL.md         # Browser installation notes
+├── SHIPPING.md        # Release checklist
+├── __tests__/         # Jest test suite
+└── dist/              # Generated production build output
 ```
 
 ### Building
@@ -88,6 +96,9 @@ npm test
 # Run tests with coverage
 npm run test:coverage
 
+# Run the gradual TypeScript baseline check
+npm run typecheck
+
 # Run tests in watch mode
 npm run test:watch
 
@@ -107,7 +118,7 @@ All steps must pass for the quality gate to succeed.
 
 ## Version
 
-**Current Version**: 1.3
+**Current Version**: 2.0.0
 
 ## License
 

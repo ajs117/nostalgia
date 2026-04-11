@@ -21,6 +21,8 @@ const defaultRequest = {
 
 const BATCH_SIZE = 21;
 const SYNC_PROGRESS_KEY = 'instagram_sync_progress';
+const NOSTALGIA_COLLECTION_NAME = 'nostalgia';
+const SYNC_LOGIN_REQUIRED_STATUS = 'login_required';
 
 // eslint-disable-next-line no-unused-vars
 function _createSyncDrawer() {
@@ -660,6 +662,110 @@ async function fetchCollections() {
   return allCollections;
 }
 
+function getCsrfToken() {
+  const cookieMatch = document.cookie.match(/(?:^|; )csrftoken=([^;]+)/);
+  return cookieMatch ? decodeURIComponent(cookieMatch[1]) : '';
+}
+
+async function instagramApiRequest(url, options = {}) {
+  const headers = {
+    ...defaultRequest.headers,
+    ...options.headers
+  };
+
+  const requestOptions = {
+    ...defaultRequest,
+    ...options,
+    headers
+  };
+
+  if ((requestOptions.method || 'GET') !== 'GET') {
+    headers['x-csrftoken'] = headers['x-csrftoken'] || getCsrfToken();
+  }
+
+  const response = await fetch(url, requestOptions);
+  let payload = null;
+
+  try {
+    payload = await response.json();
+  } catch (error) {
+    payload = null;
+  }
+
+  if (!response.ok) {
+    throw new Error(payload?.message || payload?.error || `Request failed with status ${response.status}`);
+  }
+
+  return payload;
+}
+
+function normalizeCollection(item) {
+  return item?.collection ? item.collection : item;
+}
+
+async function ensureNostalgiaCollection() {
+  const collections = await fetchCollections();
+  const existingCollection = collections
+    .map(normalizeCollection)
+    .find((collection) => collection?.collection_name?.toLowerCase() === NOSTALGIA_COLLECTION_NAME);
+
+  if (existingCollection) {
+    return { collection: existingCollection, collections };
+  }
+
+  const created = await instagramApiRequest('https://i.instagram.com/api/v1/collections/create/', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/x-www-form-urlencoded; charset=UTF-8'
+    },
+    body: new URLSearchParams({
+      collection_name: NOSTALGIA_COLLECTION_NAME,
+      added_media_ids: '[]'
+    }).toString(),
+    redirect: 'error'
+  });
+
+  const updatedCollections = await fetchCollections();
+  return {
+    collection: normalizeCollection(created),
+    collections: updatedCollections
+  };
+}
+
+async function addPostToCollection(post, collectionId) {
+  return instagramApiRequest(`https://i.instagram.com/api/v1/media/${post.id}/save/`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/x-www-form-urlencoded; charset=UTF-8'
+    },
+    body: new URLSearchParams({
+      added_collection_ids: JSON.stringify([String(collectionId)]),
+      radio_type: 'wifi-none',
+      module_name: 'nostalgia_extension'
+    }).toString(),
+    redirect: 'error'
+  });
+}
+
+async function addPostToNostalgiaCollection(post) {
+  const { collection, collections } = await ensureNostalgiaCollection();
+  const collectionId = collection?.collection_id || collection?.collection_pk || collection?.id;
+
+  if (!collectionId) {
+    throw new Error('Could not determine nostalgia collection id');
+  }
+
+  await addPostToCollection(post, collectionId);
+
+  return {
+    success: true,
+    collectionId,
+    collectionName: collection.collection_name || NOSTALGIA_COLLECTION_NAME,
+    message: `Saved to ${collection.collection_name || NOSTALGIA_COLLECTION_NAME}`,
+    updatedCollections: collections
+  };
+}
+
 // Get total saved posts count - try user info endpoint first, then estimate from collections
 async function fetchTotalSavedCount() {
   try {
@@ -828,7 +934,21 @@ async function processPost(post, savedOrder = 0) {
 let lastProgressSave = 0;
 const PROGRESS_SAVE_INTERVAL = 5000; // Only save progress every 5 seconds
 
-async function saveBatchIfFull(batchBuffer, syncedCount, failedCount, currentMinId, savedMinId, savedMaxId, maxId, total = 0) {
+/**
+ * @param {boolean} checkingNewPosts
+ * @param {string} savedMaxId
+ * @param {string} maxId
+ * @returns {string}
+ */
+function getPersistedMaxIdForProgress(checkingNewPosts, savedMaxId, maxId) {
+  if (checkingNewPosts && savedMaxId) {
+    return savedMaxId;
+  }
+
+  return maxId || savedMaxId || '';
+}
+
+async function saveBatchIfFull(batchBuffer, syncedCount, failedCount, currentMinId, savedMinId, savedMaxId, maxId, total = 0, checkingNewPosts = false) {
   if (batchBuffer.length >= BATCH_SIZE) {
     const result = await saveBatch(batchBuffer);
     const addedCount = result?.added || batchBuffer.length;
@@ -838,7 +958,13 @@ async function saveBatchIfFull(batchBuffer, syncedCount, failedCount, currentMin
     // Throttle progress saves - only save every 5 seconds to avoid blocking
     const now = Date.now();
     if (now - lastProgressSave >= PROGRESS_SAVE_INTERVAL) {
-      await saveProgress(currentMinId || savedMinId || '', maxId || savedMaxId || '', syncedCount, failedCount, total);
+      await saveProgress(
+        currentMinId || savedMinId || '',
+        getPersistedMaxIdForProgress(checkingNewPosts, savedMaxId, maxId),
+        syncedCount,
+        failedCount,
+        total
+      );
       lastProgressSave = now;
     }
 
@@ -978,11 +1104,11 @@ async function getInstagramSavedPosts() {
       const errorMsg = 'You are not logged in to Instagram. Please log in and try again.';
       console.error(errorMsg);
       chrome.runtime.sendMessage({
-        action: 'IMPORT_FAILED',
+        action: 'SYNC_LOGIN_REQUIRED',
         error: errorMsg
       });
       isSyncing = false;
-      return { syncedCount: 0, failedCount: 0 };
+      return { syncedCount: 0, failedCount: 0, status: SYNC_LOGIN_REQUIRED_STATUS };
     }
 
     // Track API order - API returns newest saved first, so we assign timestamps for ordering
@@ -1131,7 +1257,7 @@ async function getInstagramSavedPosts() {
                   const element = result.value;
                   batchBuffer.push(element);
 
-                  syncedCount = await saveBatchIfFull(batchBuffer, syncedCount, failedCount, currentMinId, savedMinId, savedMaxId, maxId, totalSavedCount);
+                  syncedCount = await saveBatchIfFull(batchBuffer, syncedCount, failedCount, currentMinId, savedMinId, savedMaxId, maxId, totalSavedCount, checkingNewPosts);
 
                   if (!isSyncing) break; // Check after saving batch
                 } else {
@@ -1200,7 +1326,7 @@ async function getInstagramSavedPosts() {
                 const element = result.value;
                 batchBuffer.push(element);
 
-                syncedCount = await saveBatchIfFull(batchBuffer, syncedCount, failedCount, currentMinId, savedMinId, savedMaxId, maxId, totalSavedCount);
+                syncedCount = await saveBatchIfFull(batchBuffer, syncedCount, failedCount, currentMinId, savedMinId, savedMaxId, maxId, totalSavedCount, checkingNewPosts);
 
                 if (!isSyncing) break; // Check after saving batch
               } else {
@@ -1266,7 +1392,7 @@ async function getInstagramSavedPosts() {
     // Save progress (always, even if stopped)
     await saveProgress(
       currentMinId || savedMinId || '',
-      maxId || savedMaxId || '',
+      getPersistedMaxIdForProgress(checkingNewPosts, savedMaxId, maxId),
       syncedCount,
       failedCount,
       totalSavedCount
@@ -1384,6 +1510,10 @@ chrome.runtime.onMessage.addListener(async (request) => {
     try {
       const result = await getInstagramSavedPosts();
 
+      if (result?.status === SYNC_LOGIN_REQUIRED_STATUS) {
+        return;
+      }
+
       if (isSyncing) {
         chrome.runtime.sendMessage({
           action: 'SYNC_FINISHED',
@@ -1455,14 +1585,22 @@ chrome.runtime.onMessage.addListener(async (request) => {
         progressElement.innerHTML = `<span style="color: #fcb045;">Stopping...</span> <span style="opacity: 0.6;">(${syncedCount} synced, ${failedCount} failed)</span>`;
       }
     }
-
-    // Send stopped notification
-    chrome.runtime.sendMessage({
-      action: 'SYNC_STOPPED',
-      syncedCount: syncedCount,
-      failedCount: failedCount
-    });
   }
+});
+
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action !== 'ADD_POST_TO_NOSTALGIA_COLLECTION') {
+    return false;
+  }
+
+  addPostToNostalgiaCollection(request.post)
+    .then((response) => sendResponse(response))
+    .catch((error) => {
+      console.error('Error adding post to nostalgia collection:', error);
+      sendResponse({ success: false, error: error.message });
+    });
+
+  return true;
 });
 
 // Sync drawer removed - sync is now handled entirely in the main app

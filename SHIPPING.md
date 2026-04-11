@@ -1,4 +1,4 @@
-# nostalgia v1.0 - Shipping Checklist
+# nostalgia v2.0.0 - Shipping Checklist
 
 ## ✅ Code Review Complete
 
@@ -19,8 +19,9 @@
 ## ✅ Branding
 
 - [x] Extension name: "nostalgia"
-- [x] Version: 1.0
-- [x] Instagram-style gradient theme
+- [x] Version: 2.0.0
+- [x] Light and dark themes
+- [x] Internationalized viewer UI and manifest metadata
 - [x] Logo SVG created (`logo.svg`)
 - [x] All user-facing text updated
 
@@ -30,13 +31,11 @@
 - `manifest.json` - Extension manifest
 - `background.js` - Minified service worker
 - `contentScript.js` - Minified content script
+- `i18n.js` - Minified viewer internationalization runtime
 - `app.js` - Minified main app
-- `popup.js` - Minified popup
 - `index.html` - Viewer page
-- `popup.html` - Popup page
 - `styles.css` - Minified styles
-- `theme.css` - Minified theme
-- `popup.css` - Minified popup styles
+- `_locales/` - Localized manifest metadata
 - `logo192.png` - Extension icon (16x16, 48x48, 128x128)
 - `logo512.png` - Large icon
 - `favicon.ico` - Favicon
@@ -56,7 +55,7 @@
    ```bash
    npm run package
    ```
-   This creates `nostalgia-v1.0.zip`
+   This creates `nostalgia-v2.0.0.zip`
 
 3. **Chrome Web Store** (if publishing):
    - Create developer account
