@@ -24,12 +24,14 @@ let lastKnownSyncTotal = 0;
 let currentTheme = 'dark';
 let currentLanguage = 'en';
 let currentAutoplayEnabled = true;
+let currentLoopEnabled = false;
 /** @type {LocalizedSyncStatusState} */
 let currentSyncStatusState = { status: '', key: null, params: null };
 
 const THEME_STORAGE_KEY = 'nostalgia_theme';
 const LANGUAGE_STORAGE_KEY = 'nostalgia_language';
 const AUTOPLAY_STORAGE_KEY = 'nostalgia_autoplay';
+const LOOP_STORAGE_KEY = 'nostalgia_loop';
 
 function getI18nApi() {
   /** @type {NostalgiaI18nApi} */
@@ -86,6 +88,26 @@ function getTrashIconMarkup() {
   `;
 }
 
+function getExportIconMarkup() {
+  return `
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+      <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+      <polyline points="7 10 12 15 17 10"/>
+      <line x1="12" y1="15" x2="12" y2="3"/>
+    </svg>
+  `;
+}
+
+function getImportIconMarkup() {
+  return `
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+      <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+      <polyline points="17 8 12 3 7 8"/>
+      <line x1="12" y1="3" x2="12" y2="15"/>
+    </svg>
+  `;
+}
+
 function applyTheme(theme) {
   currentTheme = theme === 'light' ? 'light' : 'dark';
   document.documentElement.dataset.theme = currentTheme;
@@ -138,6 +160,34 @@ function toggleModalAutoplay() {
   preloadUpcomingModalMedia();
 }
 
+function getLoopButtonLabel() {
+  return currentLoopEnabled ? t('loopOn') : t('loopOff');
+}
+
+function updateModalLoopButton(post = getCurrentModalPost()) {
+  const loopBtn = document.getElementById('modal-loop-btn');
+  if (!loopBtn) return;
+
+  const shouldShow = isModalAutoplayCapable(post);
+  loopBtn.style.display = shouldShow ? '' : 'none';
+  loopBtn.textContent = getLoopButtonLabel();
+  loopBtn.setAttribute('aria-pressed', currentLoopEnabled ? 'true' : 'false');
+}
+
+function applyLoopPreference(enabled) {
+  currentLoopEnabled = enabled === true;
+  localStorage.setItem(LOOP_STORAGE_KEY, currentLoopEnabled ? 'true' : 'false');
+  updateModalLoopButton();
+
+  document.querySelectorAll('#modal-media video').forEach((video) => {
+    video.loop = currentLoopEnabled;
+  });
+}
+
+function toggleModalLoop() {
+  applyLoopPreference(!currentLoopEnabled);
+}
+
 function getResumeDetailsText(progress) {
   const params = {
     synced: progress.synced || 0,
@@ -152,7 +202,8 @@ function getResumeDetailsText(progress) {
 
 function updateLocalizedSyncStatus(status, key, params = {}) {
   currentSyncStatusState = { status, key, params };
-  updateSyncStatus(status, key ? t(key, params) : '');
+  const percent = typeof params.percent === 'number' ? params.percent : null;
+  updateSyncStatus(status, key ? t(key, params) : '', percent);
 }
 
 function populateLanguageSelect() {
@@ -218,11 +269,13 @@ function initializePreferences() {
   currentLanguage = localStorage.getItem(LANGUAGE_STORAGE_KEY) || getI18nApi().detectLanguage();
   currentTheme = localStorage.getItem(THEME_STORAGE_KEY) || 'dark';
   currentAutoplayEnabled = localStorage.getItem(AUTOPLAY_STORAGE_KEY) !== 'false';
+  currentLoopEnabled = localStorage.getItem(LOOP_STORAGE_KEY) === 'true';
 
   populateLanguageSelect();
   applyTheme(currentTheme);
   applyLanguage(currentLanguage);
   applyAutoplayPreference(currentAutoplayEnabled);
+  applyLoopPreference(currentLoopEnabled);
 
   const languageSelect = document.getElementById('language-select');
   const themeSelect = document.getElementById('theme-select');
@@ -282,6 +335,27 @@ function setupSettingsModal() {
   if (overlay) {
     overlay.addEventListener('click', closeSettingsModal);
   }
+
+  const clearAllDataBtn = document.getElementById('clear-all-data-btn');
+  if (clearAllDataBtn) {
+    clearAllDataBtn.addEventListener('click', clearAllData);
+  }
+
+  const exportDataBtn = document.getElementById('export-data-btn');
+  if (exportDataBtn) {
+    exportDataBtn.addEventListener('click', exportData);
+  }
+
+  const importDataBtn = document.getElementById('import-data-btn');
+  const importDataInput = document.getElementById('import-data-input');
+  if (importDataBtn && importDataInput) {
+    importDataBtn.addEventListener('click', () => importDataInput.click());
+    importDataInput.addEventListener('change', (event) => {
+      const file = event.target.files[0];
+      event.target.value = '';
+      if (file) importData(file);
+    });
+  }
 }
 
 // Debounce helper
@@ -339,6 +413,8 @@ function createVideoElement(src) {
   };
 
   video.addEventListener('volumechange', saveVolumeState);
+
+  video.loop = currentLoopEnabled;
 
   video.onerror = () => {
     console.error('Video playback error:', src);
@@ -470,9 +546,11 @@ function initializeEventListeners() {
   const downloadBtn = document.getElementById('modal-download-btn');
   const collectionBtn = document.getElementById('modal-collection-btn');
   const autoplayBtn = document.getElementById('modal-autoplay-btn');
+  const loopBtn = document.getElementById('modal-loop-btn');
   if (downloadBtn) downloadBtn.addEventListener('click', downloadCurrentMedia);
   if (collectionBtn) collectionBtn.addEventListener('click', addCurrentPostToCollection);
   if (autoplayBtn) autoplayBtn.addEventListener('click', toggleModalAutoplay);
+  if (loopBtn) loopBtn.addEventListener('click', toggleModalLoop);
 
   // Keyboard navigation
   document.addEventListener('keydown', (e) => {
@@ -696,42 +774,22 @@ function setSyncGridBanner(visible) {
   }
 }
 
+// The saved-order rebuild is triggered automatically by the background sync
+// when it detects drift (see contentScript.js) -- there's no manual entry
+// point, but we still surface progress via the same grid banner/status line
+// sync uses.
 function handleRebuildStarted() {
   isRebuilding = true;
   setSyncGridBanner(true);
-  const btn = document.getElementById('rebuild-order-btn');
-  if (btn) {
-    btn.disabled = true;
-    btn.innerHTML = buildButtonMarkup(t('rebuilding'), getSpinnerIconMarkup(16));
-  }
   updateLocalizedSyncStatus('syncing', 'rebuilding');
 }
 
 function handleRebuildComplete() {
   isRebuilding = false;
   setSyncGridBanner(false);
-  const btn = document.getElementById('rebuild-order-btn');
-  if (btn) {
-    btn.disabled = false;
-    btn.innerHTML = buildButtonMarkup(t('rebuildOrder'), getSyncIconMarkup());
-  }
   updateSyncStatus('', '');
   currentPage = 1;
   loadPosts();
-}
-
-function startRebuild() {
-  if (isSyncing || isRebuilding) return;
-  if (!confirm(t('rebuildConfirm'))) return;
-
-  isRebuilding = true;
-  const btn = document.getElementById('rebuild-order-btn');
-  if (btn) {
-    btn.disabled = true;
-    btn.innerHTML = buildButtonMarkup(t('rebuilding'), getSpinnerIconMarkup(16));
-  }
-  updateLocalizedSyncStatus('syncing', 'rebuilding');
-  chrome.runtime.sendMessage({ action: 'REBUILD_SAVED_ORDER' });
 }
 
 // Search handlers
@@ -1425,6 +1483,7 @@ function openModal(index, carouselIdx = 0) {
   const usernameEl = document.getElementById('modal-username');
   const linkEl = document.getElementById('modal-link');
   const autoplayBtn = document.getElementById('modal-autoplay-btn');
+  const loopBtn = document.getElementById('modal-loop-btn');
   const downloadBtn = document.getElementById('modal-download-btn');
   const collectionBtn = document.getElementById('modal-collection-btn');
   const hashtagsEl = document.getElementById('modal-hashtags');
@@ -1456,12 +1515,17 @@ function openModal(index, carouselIdx = 0) {
     autoplayBtn.disabled = false;
   }
 
+  if (loopBtn) {
+    loopBtn.disabled = false;
+  }
+
   if (collectionBtn) {
     collectionBtn.disabled = false;
     collectionBtn.textContent = t('addToCollection');
   }
 
   updateModalAutoplayButton(post);
+  updateModalLoopButton(post);
 
   const hashtags = extractHashtags(post.title || '');
   hashtagsEl.innerHTML = '';
@@ -1604,7 +1668,10 @@ function loadCarouselSlide(idx, post) {
     slide.appendChild(video);
     slide.dataset.loaded = 'true';
 
-    if (idx === currentCarouselIndex && currentAutoplayEnabled) {
+    // Play as soon as it's the active slide, regardless of the auto-advance
+    // preference below -- that setting only controls whether playback
+    // continues on to the next item/post once this one ends.
+    if (idx === currentCarouselIndex) {
       video.play().catch(() => { });
     }
 
@@ -1648,8 +1715,9 @@ function loadCarouselSlide(idx, post) {
           }
         });
 
-        // Auto-play if this is the current slide
-        if (idx === currentCarouselIndex && currentAutoplayEnabled) {
+        // Play as soon as it's the current slide, independent of the
+        // auto-advance preference (see the cached-media branch above).
+        if (idx === currentCarouselIndex) {
           video.play().catch(() => { });
         }
 
@@ -1748,11 +1816,12 @@ function goToCarouselSlide(idx, post) {
     preloadCarouselVideo(post, idx + 1);
   }
 
-  // Play video if the new slide has one
+  // Play video if the new slide has one, regardless of the auto-advance
+  // preference -- the user explicitly navigated here.
   const newSlide = slides[idx];
   if (newSlide) {
     const video = newSlide.querySelector('video');
-    if (video && currentAutoplayEnabled) {
+    if (video) {
       video.play().catch(() => { });
     }
   }
@@ -1780,7 +1849,7 @@ function renderVideoModal(post, container) {
 
     const video = createVideoElement(videoUrl);
     video.controls = true;
-    video.autoplay = currentAutoplayEnabled;
+    video.autoplay = true;
     video.className = 'modal-video portrait';
     videoShell.innerHTML = '';
     videoShell.appendChild(video);
@@ -1796,9 +1865,7 @@ function renderVideoModal(post, container) {
     attachVideoAutoplay(video);
 
     video.addEventListener('loadeddata', () => {
-      if (currentAutoplayEnabled) {
-        video.play().catch(() => { });
-      }
+      video.play().catch(() => { });
     });
 
     preloadUpcomingModalMedia();
@@ -1937,16 +2004,6 @@ function setupSyncPanel() {
     clearProgressBtn.addEventListener('click', clearSyncProgress);
   }
 
-  const clearAllDataBtn = document.getElementById('clear-all-data-btn');
-  if (clearAllDataBtn) {
-    clearAllDataBtn.addEventListener('click', clearAllData);
-  }
-
-  const rebuildOrderBtn = document.getElementById('rebuild-order-btn');
-  if (rebuildOrderBtn) {
-    rebuildOrderBtn.addEventListener('click', startRebuild);
-  }
-
   // Check for saved progress on load
   checkSyncProgress();
 }
@@ -2065,7 +2122,7 @@ function clearAllData() {
 
 
         // Close panel
-        closeSyncPanel();
+        closeSettingsModal();
       });
     }
 
@@ -2077,6 +2134,85 @@ function clearAllData() {
     // Clear sync status
     updateSyncStatus('', '');
   });
+}
+
+function exportData() {
+  const btn = document.getElementById('export-data-btn');
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = buildButtonMarkup(t('exporting'), getSpinnerIconMarkup(16));
+  }
+
+  chrome.runtime.sendMessage({ action: 'EXPORT_DATA' }, (response) => {
+    if (response && response.success) {
+      const json = JSON.stringify(response.data);
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const date = new Date().toISOString().slice(0, 10);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `nostalgia-backup-${date}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } else {
+      alert(response?.error || t('exportFailed'));
+    }
+
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = buildButtonMarkup(t('exportData'), getExportIconMarkup());
+    }
+  });
+}
+
+function importData(file) {
+  if (!confirm(t('importConfirm'))) {
+    return;
+  }
+
+  const btn = document.getElementById('import-data-btn');
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = buildButtonMarkup(t('importing'), getSpinnerIconMarkup(16));
+  }
+
+  const restoreBtn = () => {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = buildButtonMarkup(t('importData'), getImportIconMarkup());
+    }
+  };
+
+  const reader = new FileReader();
+  reader.onload = () => {
+    let data;
+    try {
+      data = JSON.parse(reader.result);
+    } catch (error) {
+      alert(t('importInvalidFile'));
+      restoreBtn();
+      return;
+    }
+
+    chrome.runtime.sendMessage({ action: 'IMPORT_DATA', data }, (response) => {
+      if (response && response.success) {
+        allHashtagsCache = [];
+        loadPosts();
+        alert(t('importSuccess', { count: response.importedPosts }));
+        closeSettingsModal();
+      } else {
+        alert(response?.error || t('importFailed'));
+      }
+      restoreBtn();
+    });
+  };
+  reader.onerror = () => {
+    alert(t('importInvalidFile'));
+    restoreBtn();
+  };
+  reader.readAsText(file);
 }
 
 function startSync() {
@@ -2278,12 +2414,30 @@ function handleSyncError(error) {
 
 
 // Update sync status - both in panel and in main content area
-function updateSyncStatus(status, message) {
+function updateSyncStatus(status, message, percent = null) {
   // Update status in main content (visible when panel is closed)
   const statusEl = document.getElementById('sync-status');
   if (statusEl) {
     statusEl.className = `sync-status ${status}`;
-    statusEl.textContent = message;
+    statusEl.innerHTML = '';
+
+    if (message) {
+      if (status === 'syncing' && typeof percent === 'number') {
+        const track = document.createElement('div');
+        track.className = 'sync-status-track';
+        const fill = document.createElement('div');
+        fill.className = 'sync-status-fill';
+        fill.style.width = `${percent}%`;
+        track.appendChild(fill);
+        statusEl.appendChild(track);
+      }
+
+      const label = document.createElement('span');
+      label.className = 'sync-status-label';
+      label.textContent = message;
+      statusEl.appendChild(label);
+    }
+
     statusEl.style.display = message ? 'block' : 'none';
   }
 

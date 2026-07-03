@@ -484,20 +484,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return false;
   }
 
-  if (request.action === 'REBUILD_SAVED_ORDER') {
-    // Open Instagram in a background tab and walk the feed to repair saved order.
-    chrome.tabs.create({ url: 'https://www.instagram.com/', active: false }, (tab) => {
-      activeInstagramTabId = tab.id;
-
-      chrome.tabs.onUpdated.addListener(function listener(tabId, info) {
-        if (tabId === tab.id && info.status === 'complete') {
-          setTimeout(() => {
-            safeSendToTab(tabId, { action: 'START_REBUILD' });
-          }, 1500);
-          chrome.tabs.onUpdated.removeListener(listener);
-        }
-      });
-    });
+  if (request.action === 'REBUILD_STARTED') {
+    // Sent by the content script when a sync detects saved-order drift and
+    // starts an automatic rebuild in the same tab (see contentScript.js).
     safeBroadcast({ action: 'REBUILD_STARTED' });
     return false;
   }
@@ -1235,6 +1224,27 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }).catch((error) => {
       console.error('Error getting DB bounds:', error);
       sendResponse({ min: null, max: null });
+    });
+    return true;
+  }
+
+  if (request.action === 'EXPORT_DATA') {
+    exportAllData().then((data) => {
+      sendResponse({ success: true, data });
+    }).catch((error) => {
+      console.error('Error exporting data:', error);
+      sendResponse({ success: false, error: error.message });
+    });
+    return true;
+  }
+
+  if (request.action === 'IMPORT_DATA') {
+    importAllData(request.data).then((result) => {
+      updateExtensionTab();
+      sendResponse({ success: true, ...result });
+    }).catch((error) => {
+      console.error('Error importing data:', error);
+      sendResponse({ success: false, error: error.message });
     });
     return true;
   }
@@ -2438,6 +2448,122 @@ async function clearAllPosts() {
   } catch (error) {
     if (db) db.close();
     throw error;
+  }
+}
+
+const BACKUP_FORMAT_VERSION = 1;
+
+// Bundle posts, collections, metadata, and media (thumbnails/videos) into a single
+// JSON-serializable snapshot. Blobs are inlined as data URLs so the whole backup
+// is one portable file.
+async function exportAllData() {
+  let db;
+  try {
+    db = await openDB();
+
+    const posts = await new Promise((resolve, reject) => {
+      const tx = db.transaction([STORE_POSTS], 'readonly');
+      const request = tx.objectStore(STORE_POSTS).getAll();
+      request.onsuccess = () => resolve(request.result || []);
+      request.onerror = () => reject(request.error);
+    });
+
+    const collections = await new Promise((resolve, reject) => {
+      const tx = db.transaction([STORE_COLLECTIONS], 'readonly');
+      const request = tx.objectStore(STORE_COLLECTIONS).get('all_collections');
+      request.onsuccess = () => resolve(request.result || []);
+      request.onerror = () => reject(request.error);
+    });
+
+    const metadata = await new Promise((resolve, reject) => {
+      const tx = db.transaction([STORE_METADATA], 'readonly');
+      const store = tx.objectStore(STORE_METADATA);
+      const keysRequest = store.getAllKeys();
+      const valuesRequest = store.getAll();
+      tx.oncomplete = () => resolve(keysRequest.result.map((key, i) => ({ key, value: valuesRequest.result[i] })));
+      tx.onerror = () => reject(tx.error);
+    });
+
+    const mediaEntries = await new Promise((resolve, reject) => {
+      const tx = db.transaction([STORE_MEDIA], 'readonly');
+      const store = tx.objectStore(STORE_MEDIA);
+      const keysRequest = store.getAllKeys();
+      const valuesRequest = store.getAll();
+      tx.oncomplete = () => resolve(keysRequest.result.map((key, i) => ({ key, blob: valuesRequest.result[i] })));
+      tx.onerror = () => reject(tx.error);
+    });
+
+    const media = await Promise.all(mediaEntries.map(async ({ key, blob }) => ({
+      key,
+      dataUrl: await blobToDataUrl(blob)
+    })));
+
+    return {
+      version: BACKUP_FORMAT_VERSION,
+      exportedAt: new Date().toISOString(),
+      posts,
+      collections,
+      metadata,
+      media
+    };
+  } finally {
+    if (db) db.close();
+  }
+}
+
+// Restore a snapshot produced by exportAllData(). Posts and media are upserted
+// by key (so importing into a non-empty library merges rather than duplicates);
+// collections and metadata are replaced wholesale.
+async function importAllData(data) {
+  if (!data || !Array.isArray(data.posts)) {
+    throw new Error('Invalid backup file');
+  }
+
+  let db;
+  try {
+    db = await openDB();
+
+    const mediaBlobs = await Promise.all((data.media || []).map(async ({ key, dataUrl }) => ({
+      key,
+      blob: await dataUrlToBlob(dataUrl)
+    })));
+
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction([STORE_POSTS, STORE_COLLECTIONS, STORE_METADATA, STORE_MEDIA], 'readwrite');
+
+      const postsStore = tx.objectStore(STORE_POSTS);
+      data.posts.forEach((post) => postsStore.put(post));
+
+      if (data.collections) {
+        tx.objectStore(STORE_COLLECTIONS).put(data.collections, 'all_collections');
+      }
+
+      const metaStore = tx.objectStore(STORE_METADATA);
+      (data.metadata || []).forEach(({ key, value }) => metaStore.put(value, key));
+
+      const mediaStore = tx.objectStore(STORE_MEDIA);
+      mediaBlobs.forEach(({ key, blob }) => mediaStore.put(blob, key));
+
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+
+    const postsCount = await countPostsDirectly();
+
+    // countPostsDirectly() may reflect posts merged in from an existing library, so
+    // the imported metadata's posts_count (a snapshot from the source instance) is stale.
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction([STORE_METADATA], 'readwrite');
+      tx.objectStore(STORE_METADATA).put(postsCount, 'posts_count');
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+
+    scheduleHashtagCacheRebuild(postsCount);
+
+    return { importedPosts: data.posts.length, totalPosts: postsCount };
+  } finally {
+    if (db) db.close();
   }
 }
 

@@ -356,6 +356,12 @@ body {
   width: 100%;
 }
 
+.settings-data-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
 #sync-btn {
   display: flex;
   align-items: center;
@@ -629,6 +635,27 @@ select:hover {
   background: rgba(255, 71, 87, 0.1);
   border: 1px solid rgba(255, 71, 87, 0.3);
   color: var(--error);
+}
+
+.sync-status-track {
+  width: 100%;
+  height: 6px;
+  background: var(--bg-tertiary);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+
+.sync-status-fill {
+  height: 100%;
+  background: var(--gradient-instagram);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+  animation: progressPulse 2s ease-in-out infinite;
+}
+
+.sync-status-label {
+  display: block;
 }
 
 /* Stats Bar */
@@ -1053,7 +1080,7 @@ select:hover {
   display: none;
   align-items: center;
   justify-content: center;
-  padding: 20px;
+  padding: 0;
   opacity: 0;
   transition: opacity var(--transition-normal);
 }
@@ -1066,10 +1093,9 @@ select:hover {
 .modal-content {
   display: flex;
   max-width: 1200px;
-  max-height: 90vh;
+  max-height: 100vh;
   width: 100%;
   background: var(--bg-card);
-  border-radius: var(--radius-xl);
   overflow: hidden;
   box-shadow: var(--shadow-lg);
 }
@@ -1081,7 +1107,7 @@ select:hover {
   justify-content: center;
   background: var(--bg-primary);
   min-height: 400px;
-  max-height: 90vh;
+  max-height: 100vh;
   min-width: 300px;
 }
 
@@ -1095,30 +1121,30 @@ select:hover {
 
 .modal-image {
   max-width: 100%;
-  max-height: 85vh;
+  max-height: 100vh;
   object-fit: contain;
 }
 
 /* Adaptive video player - adjusts to actual video aspect ratio */
 .modal-video {
-  max-height: 85vh;
+  max-height: 100vh;
   max-width: 100%;
   width: auto;
   height: auto;
   object-fit: contain;
 }
 
-/* Portrait video (Reels 9:16) */
+/* Portrait video (Reels 9:16) - fills the full screen height */
 .modal-video.portrait {
-  height: 85vh;
+  height: 100vh;
   width: auto;
-  max-width: calc(85vh * 9 / 16);
+  max-width: calc(100vh * 9 / 16);
 }
 
 /* Square video (1:1) */
 .modal-video.square {
-  max-height: 70vh;
-  max-width: 70vh;
+  max-height: 90vh;
+  max-width: 90vh;
 }
 
 /* Landscape video (16:9) */
@@ -1133,17 +1159,17 @@ select:hover {
   align-items: center;
   justify-content: center;
   width: 100%;
-  max-height: 85vh;
+  max-height: 100vh;
   overflow: hidden;
 }
 
 .modal-video-shell.portrait {
-  height: 85vh;
-  max-width: min(100%, calc(85vh * 9 / 16));
+  height: 100vh;
+  max-width: min(100%, calc(100vh * 9 / 16));
 }
 
 .modal-video-shell.square {
-  width: min(100%, 70vh);
+  width: min(100%, 90vh);
   aspect-ratio: 1 / 1;
 }
 
@@ -1247,6 +1273,17 @@ select:hover {
 .modal-autoplay-btn:hover:not(:disabled) {
   transform: translateY(-1px);
   background: rgba(0, 149, 246, 0.18);
+}
+
+.modal-loop-btn {
+  background: rgba(131, 58, 180, 0.12);
+  color: var(--accent-purple);
+  border-color: rgba(131, 58, 180, 0.28);
+}
+
+.modal-loop-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  background: rgba(131, 58, 180, 0.18);
 }
 
 .modal-download-btn:hover:not(:disabled) {
@@ -2232,7 +2269,7 @@ select:hover {
   line-height: 1.4;
 }
 
-.rebuild-order-btn {
+.settings-action-btn {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2249,12 +2286,12 @@ select:hover {
   transition: var(--transition-fast);
 }
 
-.rebuild-order-btn:hover {
+.settings-action-btn:hover {
   background: rgba(255, 255, 255, 0.05);
   color: var(--text-primary);
 }
 
-.rebuild-order-btn:disabled {
+.settings-action-btn:disabled {
   opacity: 0.6;
   cursor: not-allowed;
 }

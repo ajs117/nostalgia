@@ -1215,6 +1215,7 @@ async function getInstagramSavedPosts() {
     // Walk from the newest until we reconnect with a post already in the DB,
     // then slot the new saves above the current max (newest = highest), with no
     // cross-batch inversion. Skipped when the DB is empty (nothing to reconnect).
+    let orderDriftDetected = false;
     if (phases.runTop && isSyncing) {
       const newTop = [];
       let cursor = '';
@@ -1258,6 +1259,29 @@ async function getInstagramSavedPosts() {
         for (const entry of assigned) {
           if (!isSyncing) break;
           await processAndBuffer(entry.post, entry.savedOrder);
+        }
+      }
+
+      // Drift check: the TOP phase assumes everything below the first "known"
+      // post it hits is already in the DB (that's what stopped the walk). That
+      // only holds once the full history has been backfilled at least once —
+      // otherwise "unknown below a known post" is just normal, unfinished
+      // backfill. If backfill IS complete and the very next page still has an
+      // unknown post, a previously-saved post was likely unsaved and re-saved
+      // (jumping to the top on Instagram without carrying its neighbors with
+      // it), which the incremental TOP/BACKFILL scheme can't repair on its
+      // own. One cheap peek page is enough to catch it without walking the
+      // whole feed here; the full repair happens via rebuildSavedOrder().
+      if (reachedKnown && moreAvailable && isSyncing && cursorState.backfillComplete) {
+        try {
+          const peekPage = await fetchSavedPosts(cursor);
+          const peekItems = peekPage.items || [];
+          if (peekItems.length > 0) {
+            const peekExists = await checkExistenceBatch(peekItems);
+            orderDriftDetected = peekExists.some((exists) => !exists);
+          }
+        } catch (error) {
+          // Non-critical: skip drift detection on a transient failure.
         }
       }
     }
@@ -1336,7 +1360,7 @@ async function getInstagramSavedPosts() {
     }
 
     isSyncing = false;
-    return { syncedCount, failedCount, completed };
+    return { syncedCount, failedCount, completed, orderDriftDetected };
   } catch (error) {
     isSyncing = false;
     console.error(`Error syncing Instagram data: ${error.message}`);
@@ -1561,6 +1585,25 @@ function updateSyncProgress(synced, failed, total = 0) {
   updateStatsDisplay(synced, failed);
 }
 
+// If the sync detected saved-order drift (see getInstagramSavedPosts), silently
+// run the full rebuild in this same tab before reporting the sync as finished.
+// Broadcasts mirror the manual rebuild flow so the UI shows the same progress.
+async function runAutoRebuildIfDrifted(result) {
+  if (!result || !result.completed || !result.orderDriftDetected) return;
+
+  chrome.runtime.sendMessage({ action: 'REBUILD_STARTED' });
+  try {
+    const rebuildResult = await rebuildSavedOrder();
+    chrome.runtime.sendMessage({
+      action: rebuildResult.completed ? 'REBUILD_FINISHED' : 'REBUILD_STOPPED',
+      processed: rebuildResult.processed || 0
+    });
+  } catch (error) {
+    console.error(`Error during auto-rebuild: ${error.message}`);
+    chrome.runtime.sendMessage({ action: 'REBUILD_STOPPED', processed: 0 });
+  }
+}
+
 chrome.runtime.onMessage.addListener(async (request) => {
   if (request.action === 'SHOW_SYNC_DRAWER') {
     // Sync drawer removed - sync is now handled entirely in the main app
@@ -1575,6 +1618,7 @@ chrome.runtime.onMessage.addListener(async (request) => {
       }
 
       if (result.completed) {
+        await runAutoRebuildIfDrifted(result);
         chrome.runtime.sendMessage({
           action: 'SYNC_FINISHED',
           syncedCount: result.syncedCount,
@@ -1595,22 +1639,6 @@ chrome.runtime.onMessage.addListener(async (request) => {
         error: error.message
       });
     }
-  } else if (request.action === 'START_REBUILD') {
-    try {
-      const result = await rebuildSavedOrder();
-
-      if (result?.status === SYNC_LOGIN_REQUIRED_STATUS) {
-        return;
-      }
-
-      chrome.runtime.sendMessage({
-        action: result.completed ? 'REBUILD_FINISHED' : 'REBUILD_STOPPED',
-        processed: result.processed || 0
-      });
-    } catch (error) {
-      console.error(`Error during rebuild: ${error.message}`);
-      chrome.runtime.sendMessage({ action: 'IMPORT_FAILED', error: error.message });
-    }
   } else if (request.action === 'SYNC_COMPLETE') {
     updateSyncDrawer(request.syncedCount, request.failedCount, false);
   } else if (request.action === 'IMPORT_INSTAGRAM_POSTS') {
@@ -1620,6 +1648,7 @@ chrome.runtime.onMessage.addListener(async (request) => {
       if (!result.completed) {
         updateSyncDrawer(result.syncedCount, result.failedCount, true);
       } else {
+        await runAutoRebuildIfDrifted(result);
         chrome.runtime.sendMessage({
           action: 'SYNC_FINISHED',
           syncedCount: result.syncedCount,
