@@ -903,8 +903,9 @@ async function processPost(post, savedOrder = 0) {
         isVideo: itemIsVideo,
         // Get the best quality image for the thumbnail
         imageUrl: item.image_versions2?.candidates?.[0]?.url || null,
-        // For videos, also store video info
-        videoVersions: itemIsVideo ? (item.video_versions || []) : null,
+        // Note: video URLs are fetched live (FETCH_CAROUSEL_VIDEO) when played,
+        // not persisted here — Instagram's video_versions URLs expire and were
+        // never read back, so storing them only bloated the database.
         width: item.original_width || item.image_versions2?.candidates?.[0]?.width || 0,
         height: item.original_height || item.image_versions2?.candidates?.[0]?.height || 0
       };
@@ -931,47 +932,70 @@ async function processPost(post, savedOrder = 0) {
   return createPostElement(post, postId, url, thumbnailBase64, carouselMedia, savedOrder);
 }
 
-let lastProgressSave = 0;
-const PROGRESS_SAVE_INTERVAL = 5000; // Only save progress every 5 seconds
+const PROGRESS_SAVE_INTERVAL = 5000; // Throttle persistence of progress/cursor state
 
-/**
- * @param {boolean} checkingNewPosts
- * @param {string} savedMaxId
- * @param {string} maxId
- * @returns {string}
- */
-function getPersistedMaxIdForProgress(checkingNewPosts, savedMaxId, maxId) {
-  if (checkingNewPosts && savedMaxId) {
-    return savedMaxId;
-  }
+// Resumable two-phase sync state (survives completion; only cleared by "Clear All Data").
+const SYNC_CURSOR_KEY = 'nostalgia_sync_cursor';
 
-  return maxId || savedMaxId || '';
+function loadSyncCursor() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([SYNC_CURSOR_KEY], (result) => {
+      const state = result[SYNC_CURSOR_KEY];
+      if (state && typeof state === 'object') {
+        resolve({
+          backfillCursor: state.backfillCursor || '',
+          backfillComplete: !!state.backfillComplete
+        });
+      } else {
+        resolve({ backfillCursor: '', backfillComplete: false });
+      }
+    });
+  });
 }
 
-async function saveBatchIfFull(batchBuffer, syncedCount, failedCount, currentMinId, savedMinId, savedMaxId, maxId, total = 0, checkingNewPosts = false) {
-  if (batchBuffer.length >= BATCH_SIZE) {
-    const result = await saveBatch(batchBuffer);
-    const addedCount = result?.added || batchBuffer.length;
-    syncedCount += addedCount;
-    batchBuffer.length = 0;
+function saveSyncCursor(state) {
+  return new Promise((resolve) => {
+    chrome.storage.local.set({ [SYNC_CURSOR_KEY]: state }, resolve);
+  });
+}
 
-    // Throttle progress saves - only save every 5 seconds to avoid blocking
-    const now = Date.now();
-    if (now - lastProgressSave >= PROGRESS_SAVE_INTERVAL) {
-      await saveProgress(
-        currentMinId || savedMinId || '',
-        getPersistedMaxIdForProgress(checkingNewPosts, savedMaxId, maxId),
-        syncedCount,
-        failedCount,
-        total
-      );
-      lastProgressSave = now;
-    }
+// Resolve when sync is stopped or after `ms`, whichever comes first.
+function syncDelay(ms) {
+  return new Promise((resolve) => {
+    const checkInterval = setInterval(() => {
+      if (!isSyncing) {
+        clearInterval(checkInterval);
+        resolve();
+      }
+    }, 100);
+    setTimeout(() => {
+      clearInterval(checkInterval);
+      resolve();
+    }, ms);
+  });
+}
 
-    updateSyncProgress(syncedCount, failedCount, total);
-    return syncedCount;
+// Batch existence check against the local DB for a page of API items.
+function checkExistenceBatch(items) {
+  const postIds = items.map((p) => p.id || `${p.user?.username}-${p.code}`);
+  const links = items.map((p) => `https://www.instagram.com/p/${p.code}/`);
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({
+      action: 'CHECK_POSTS_BATCH_EXISTS',
+      postIds,
+      links
+    }, (response) => {
+      resolve(response?.results || postIds.map(() => false));
+    });
+  });
+}
+
+function getSyncOrdering() {
+  if (typeof self !== 'undefined' && self.NostalgiaSyncOrdering) {
+    return self.NostalgiaSyncOrdering;
   }
-  return syncedCount;
+  // eslint-disable-next-line no-undef
+  return NostalgiaSyncOrdering;
 }
 
 async function downloadAndCompressThumbnail(imageUrl) {
@@ -997,7 +1021,9 @@ async function downloadAndCompressThumbnail(imageUrl) {
     const blob = await response.blob();
 
     return new Promise((resolve, reject) => {
+      const objectUrl = URL.createObjectURL(blob);
       const timeout = setTimeout(() => {
+        URL.revokeObjectURL(objectUrl);
         reject(new Error('Thumbnail processing timeout'));
       }, TIMEOUT);
 
@@ -1006,6 +1032,7 @@ async function downloadAndCompressThumbnail(imageUrl) {
 
       img.onload = () => {
         clearTimeout(timeout);
+        URL.revokeObjectURL(objectUrl);
         try {
           const canvas = document.createElement('canvas');
           const maxSize = 280;
@@ -1040,10 +1067,11 @@ async function downloadAndCompressThumbnail(imageUrl) {
 
       img.onerror = () => {
         clearTimeout(timeout);
+        URL.revokeObjectURL(objectUrl);
         reject(new Error('Failed to load image'));
       };
 
-      img.src = URL.createObjectURL(blob);
+      img.src = objectUrl;
     });
   } catch (error) {
     if (error.name === 'AbortError') {
@@ -1108,54 +1136,37 @@ async function getInstagramSavedPosts() {
         error: errorMsg
       });
       isSyncing = false;
-      return { syncedCount: 0, failedCount: 0, status: SYNC_LOGIN_REQUIRED_STATUS };
+      return { syncedCount: 0, failedCount: 0, completed: false, status: SYNC_LOGIN_REQUIRED_STATUS };
     }
 
-    // Track API order - API returns newest saved first, so we assign timestamps for ordering
-    // Use current time as base, subtract counter to ensure newest posts get lowest values
+    const ordering = getSyncOrdering();
+
+    // Snapshot the DB extents and size. savedOrder anchors are derived from the
+    // DB itself every run (no drifting counters): new saves go ABOVE max,
+    // historical backfill goes BELOW min.
     const dbBounds = await new Promise((resolve) => {
       chrome.runtime.sendMessage({ action: 'GET_DB_BOUNDS' }, (response) => {
         resolve(response || { min: null, max: null });
       });
     });
 
-    // Initialize counters for savedOrder
-    // High numbers = Newer posts. Low numbers = Older posts.
-    let topOrderCounter = dbBounds.max !== null ? dbBounds.max : Date.now();
-    let bottomOrderCounter = dbBounds.min !== null ? dbBounds.min : Date.now();
-
-    // Safety check - ensures we don't overlap if something is weird
-    if (topOrderCounter < bottomOrderCounter) {
-      topOrderCounter = bottomOrderCounter;
-    }
-
-    const savedProgress = await new Promise((resolve) => {
-      chrome.storage.local.get([SYNC_PROGRESS_KEY], (result) => {
-        resolve(result[SYNC_PROGRESS_KEY] || null);
-      });
-    });
-
-    // Get current posts count for progress tracking
     const postsCount = await new Promise((resolve) => {
       chrome.runtime.sendMessage({ action: 'GET_POSTS_COUNT' }, (response) => {
         if (chrome.runtime.lastError) {
           resolve(0);
         } else {
-          resolve(response.count || 0);
+          resolve((response && response.count) || 0);
         }
       });
     });
 
-    if (savedProgress) {
-      syncedCount = savedProgress.synced || 0;
-      failedCount = savedProgress.failed || 0;
-    } else if (postsCount > 0) {
-      syncedCount = postsCount;
-      failedCount = 0;
-    } else {
-      syncedCount = 0;
-      failedCount = 0;
-    }
+    const dbEmpty = postsCount === 0;
+    let topMax = (dbBounds && dbBounds.max !== null && dbBounds.max !== undefined) ? dbBounds.max : 0;
+    let bottomMin = (dbBounds && dbBounds.min !== null && dbBounds.min !== undefined) ? dbBounds.min : 0;
+
+    // syncedCount reflects total posts in the DB (existing + newly added this run).
+    syncedCount = dbEmpty ? 0 : postsCount;
+    failedCount = 0;
 
     // Fetch total saved posts count from Instagram API
     totalSavedCount = await fetchTotalSavedCount();
@@ -1168,248 +1179,297 @@ async function getInstagramSavedPosts() {
     }
 
     const collections = await fetchCollections();
+    chrome.runtime.sendMessage({ action: 'SAVE_COLLECTIONS', collections });
 
-    chrome.runtime.sendMessage({
-      action: 'SAVE_COLLECTIONS',
-      collections: collections
-    });
+    const cursorState = await loadSyncCursor();
+    const phases = ordering.decideSyncPhase({ dbEmpty, backfillComplete: cursorState.backfillComplete });
 
-    let savedMinId = savedProgress?.minId || '';
-    let savedMaxId = savedProgress?.maxId || '';
-    let currentMinId = '';
-    let maxId = '';
-    let moreAvailable = true;
-    let retryCount = 0;
-    const maxRetries = 3;
-    let batchBuffer = [];
-    let checkingNewPosts = !!savedMinId;
+    const batchBuffer = [];
+    let lastPersistAt = 0;
+
+    const flushBatch = async (force) => {
+      if (batchBuffer.length === 0) return;
+      if (!force && batchBuffer.length < BATCH_SIZE) return;
+      const toSave = batchBuffer.splice(0, batchBuffer.length);
+      const result = await saveBatch(toSave);
+      const added = (result && typeof result.added === 'number') ? result.added : toSave.length;
+      syncedCount += added;
+      updateSyncProgress(syncedCount, failedCount, totalSavedCount);
+    };
+
+    const processAndBuffer = async (post, savedOrder) => {
+      try {
+        const element = await processPost(post, savedOrder);
+        batchBuffer.push(element);
+        await flushBatch(false);
+      } catch (error) {
+        console.error('Error processing post:', error);
+        failedCount++;
+        updateSyncProgress(syncedCount, failedCount, totalSavedCount);
+      }
+    };
 
     updateSyncProgress(syncedCount, failedCount, totalSavedCount);
-    maxId = '';
 
-    while (moreAvailable && isSyncing) {
-      try {
-        if (!isSyncing) break; // Check before API call
+    // ---------------- Phase A: TOP (saves added since last sync) -------------
+    // Walk from the newest until we reconnect with a post already in the DB,
+    // then slot the new saves above the current max (newest = highest), with no
+    // cross-batch inversion. Skipped when the DB is empty (nothing to reconnect).
+    if (phases.runTop && isSyncing) {
+      const newTop = [];
+      let cursor = '';
+      let moreAvailable = true;
+      let reachedKnown = false;
+      let retryCount = 0;
 
-        const savedPosts = await fetchSavedPosts(maxId);
+      while (moreAvailable && isSyncing && !reachedKnown) {
+        try {
+          const page = await fetchSavedPosts(cursor);
+          if (!isSyncing) break;
 
-        if (!isSyncing) break; // Check after API call
-
-        if (savedPosts.items && savedPosts.items.length > 0 && maxId === '') {
-          const firstPost = savedPosts.items[0];
-          if (firstPost && firstPost.id) {
-            currentMinId = firstPost.id;
+          const items = page.items || [];
+          if (items.length === 0) {
+            moreAvailable = page.more_available;
+            break;
           }
 
-          // Estimate total for progress (using savedPosts.items.length directly)
+          const exists = await checkExistenceBatch(items);
+          const collected = ordering.collectLeadingUnknown(items, exists);
+          newTop.push(...collected.newOnes);
+          reachedKnown = collected.reachedKnown;
+          moreAvailable = page.more_available;
+          cursor = page.next_max_id || '';
+          retryCount = 0;
+
+          if (reachedKnown) break;
+          await syncDelay(500);
+        } catch (error) {
+          if (!isSyncing) break;
+          console.error(`Error in top-phase fetch: ${error.message}`);
+          retryCount++;
+          if (retryCount > 3) break;
+          await syncDelay(5000);
         }
+      }
 
-        // Skip posts that already exist using efficient batch check
-        const postIdsToCheck = savedPosts.items.map(p => p.id || `${p.user?.username}-${p.code}`);
-        const linksToCheck = savedPosts.items.map(p => `https://www.instagram.com/p/${p.code}/`);
-
-        const existenceResults = await new Promise((resolve) => {
-          chrome.runtime.sendMessage({
-            action: 'CHECK_POSTS_BATCH_EXISTS',
-            postIds: postIdsToCheck,
-            links: linksToCheck
-          }, (response) => {
-            resolve(response?.results || postIdsToCheck.map(() => false));
-          });
-        });
-
-        const newPostsInBatch = savedPosts.items.filter((post, index) => !existenceResults[index]);
-
-        // Check if we've caught up with existing posts
-        if (checkingNewPosts && savedMinId && savedPosts.items.length > 0) {
-          const foundSavedPostIndex = savedPosts.items.findIndex(p => {
-            const postId = p.id || `${p.user?.username}-${p.code}`;
-            return postId === savedMinId;
-          });
-
-          if (foundSavedPostIndex >= 0) {
-            const newPostsBeforeSaved = savedPosts.items.slice(0, foundSavedPostIndex);
-
-            // Process posts one at a time to avoid rate limiting
-            const PARALLEL_BATCH = 1;
-            for (let i = 0; i < newPostsBeforeSaved.length && isSyncing; i += PARALLEL_BATCH) {
-              if (!isSyncing) break; // Check before processing batch
-
-              const batch = newPostsBeforeSaved.slice(i, i + PARALLEL_BATCH);
-
-              const results = await Promise.allSettled(
-                batch.map((post, batchIndex) => {
-                  // This loop (finding connection) is always processing New/Top posts
-                  // Logic: P0(Newest) > P1 > ... > TopOrderCounter
-                  const order = topOrderCounter + (batch.length - batchIndex);
-                  return processPost(post, order);
-                })
-              );
-
-              topOrderCounter += batch.length;
-
-              if (!isSyncing) break; // Check after processing batch
-
-              for (const result of results) {
-                if (!isSyncing) break; // Check before processing each result
-
-                if (result.status === 'fulfilled') {
-                  const element = result.value;
-                  batchBuffer.push(element);
-
-                  syncedCount = await saveBatchIfFull(batchBuffer, syncedCount, failedCount, currentMinId, savedMinId, savedMaxId, maxId, totalSavedCount, checkingNewPosts);
-
-                  if (!isSyncing) break; // Check after saving batch
-                } else {
-                  console.error('Error processing post:', result.reason);
-                  failedCount++;
-                  updateSyncProgress(syncedCount, failedCount, totalSavedCount);
-                }
-              }
-            }
-
-            checkingNewPosts = false;
-            if (savedMaxId) {
-              maxId = savedMaxId;
-              savedMinId = '';
-              continue;
-            } else {
-              savedMinId = '';
-            }
-          }
-        }
-
-        if (checkingNewPosts || !savedMinId) {
-          if (!isSyncing) break; // Check before processing new posts
-
-          maxId = savedPosts.next_max_id;
-
-          // Process posts one at a time to avoid rate limiting
-          const PARALLEL_BATCH = 1; // Process one at a time to avoid Instagram rate limiting
-          for (let i = 0; i < newPostsInBatch.length && isSyncing; i += PARALLEL_BATCH) {
-            if (!isSyncing) break; // Check before processing batch
-
-            const batch = newPostsInBatch.slice(i, i + PARALLEL_BATCH);
-
-            // Process batch in parallel - API returns newest first, so we preserve that order
-            // checkingNewPosts=true means we are scanning for connection -> TOP mode
-            // checkingNewPosts=false means we are filling gaps/history -> BOTTOM mode
-            const isTopMode = checkingNewPosts;
-
-            // Process batch in parallel - API returns newest first, so we preserve that order
-            const results = await Promise.allSettled(
-              batch.map((post, batchIndex) => {
-                let order;
-                if (isTopMode) {
-                  // New/Top posts: Ascending above Max
-                  order = topOrderCounter + (batch.length - batchIndex);
-                } else {
-                  // History/Bottom posts: Descending below Min
-                  order = bottomOrderCounter - 1 - batchIndex;
-                }
-                return processPost(post, order);
-              })
-            );
-
-            if (isTopMode) {
-              topOrderCounter += batch.length;
-            } else {
-              bottomOrderCounter -= batch.length;
-            }
-
-            if (!isSyncing) break; // Check after processing batch
-
-            for (const result of results) {
-              if (!isSyncing) break; // Check before processing each result
-
-              if (result.status === 'fulfilled') {
-                const element = result.value;
-                batchBuffer.push(element);
-
-                syncedCount = await saveBatchIfFull(batchBuffer, syncedCount, failedCount, currentMinId, savedMinId, savedMaxId, maxId, totalSavedCount, checkingNewPosts);
-
-                if (!isSyncing) break; // Check after saving batch
-              } else {
-                console.error('Error processing post:', result.reason);
-                failedCount++;
-                updateSyncProgress(syncedCount, failedCount, totalSavedCount);
-              }
-            }
-          }
-        }
-
-        if (!isSyncing) break; // Check before delay
-
-        // Delay between API calls for better performance
-        // But check isSyncing during delay to stop faster
-        await new Promise((resolve) => {
-          const checkInterval = setInterval(() => {
-            if (!isSyncing) {
-              clearInterval(checkInterval);
-              resolve();
-            }
-          }, 100);
-          setTimeout(() => {
-            clearInterval(checkInterval);
-            resolve();
-          }, 500);
-        });
-        moreAvailable = savedPosts.more_available;
-        retryCount = 0;
-
-      } catch (error) {
-        if (!isSyncing) break; // Stop immediately if sync was stopped
-
-        console.error(`Error in fetch loop: ${error.message}`);
-        retryCount++;
-        if (retryCount > maxRetries) {
-          moreAvailable = false;
-        } else {
-          // Check isSyncing during retry delay
-          await new Promise((resolve) => {
-            const checkInterval = setInterval(() => {
-              if (!isSyncing) {
-                clearInterval(checkInterval);
-                resolve();
-              }
-            }, 100);
-            setTimeout(() => {
-              clearInterval(checkInterval);
-              resolve();
-            }, 5000);
-          });
+      if (newTop.length > 0 && isSyncing) {
+        const assigned = ordering.assignTopOrders(newTop, topMax);
+        topMax += newTop.length;
+        for (const entry of assigned) {
+          if (!isSyncing) break;
+          await processAndBuffer(entry.post, entry.savedOrder);
         }
       }
     }
 
-    // Save remaining posts (even if stopped, save what we have)
-    if (batchBuffer.length > 0) {
-      const result = await saveBatch(batchBuffer);
-      const addedCount = result?.added || batchBuffer.length;
-      syncedCount += addedCount;
+    // ---------------- Phase B: BACKFILL (historical, resumable) --------------
+    // Continue the deep history from the persisted cursor, assigning values
+    // below the current min. Resumes across stop/restart until the API reports
+    // no more pages (more_available === false), which marks backfill complete.
+    if (phases.runBackfill && isSyncing) {
+      let cursor = dbEmpty ? '' : (cursorState.backfillCursor || '');
+      let moreAvailable = true;
+      let retryCount = 0;
+
+      while (moreAvailable && isSyncing) {
+        try {
+          const page = await fetchSavedPosts(cursor);
+          if (!isSyncing) break;
+
+          const items = page.items || [];
+          moreAvailable = page.more_available;
+
+          if (items.length > 0) {
+            const exists = await checkExistenceBatch(items);
+            const newOnes = items.filter((_, i) => !exists[i]);
+
+            if (newOnes.length > 0) {
+              const assigned = ordering.assignBackfillOrders(newOnes, bottomMin);
+              bottomMin -= newOnes.length;
+              for (const entry of assigned) {
+                if (!isSyncing) break;
+                await processAndBuffer(entry.post, entry.savedOrder);
+              }
+            }
+          }
+
+          cursor = page.next_max_id || '';
+          cursorState.backfillCursor = cursor;
+          if (!moreAvailable) {
+            cursorState.backfillComplete = true;
+          }
+
+          const now = Date.now();
+          if (now - lastPersistAt >= PROGRESS_SAVE_INTERVAL || !moreAvailable) {
+            await saveSyncCursor(cursorState);
+            await saveProgress('', '', syncedCount, failedCount, totalSavedCount);
+            lastPersistAt = now;
+          }
+
+          if (!moreAvailable) break;
+          await syncDelay(500);
+          retryCount = 0;
+        } catch (error) {
+          if (!isSyncing) break;
+          console.error(`Error in backfill-phase fetch: ${error.message}`);
+          retryCount++;
+          if (retryCount > 3) break;
+          await syncDelay(5000);
+        }
+      }
     }
 
-    // Save progress (always, even if stopped)
-    await saveProgress(
-      currentMinId || savedMinId || '',
-      getPersistedMaxIdForProgress(checkingNewPosts, savedMaxId, maxId),
-      syncedCount,
-      failedCount,
-      totalSavedCount
-    );
-    lastProgressSave = Date.now();
+    // Flush whatever remains (even if stopped, persist what we have).
+    await flushBatch(true);
+
+    const userStopped = !isSyncing;
+    const completed = !userStopped && cursorState.backfillComplete === true;
+
+    // Always persist cursor + counters so a stop/restart resumes cleanly.
+    await saveSyncCursor(cursorState);
+    await saveProgress('', '', syncedCount, failedCount, totalSavedCount);
     updateSyncProgress(syncedCount, failedCount, totalSavedCount);
 
-    // Only clear progress if sync completed successfully (not stopped)
-    if (isSyncing) {
+    // Clear the UI resume marker only when the whole backfill is finished.
+    if (completed) {
       await clearProgress();
     }
 
     isSyncing = false;
-    return { syncedCount, failedCount };
+    return { syncedCount, failedCount, completed };
   } catch (error) {
     isSyncing = false;
     console.error(`Error syncing Instagram data: ${error.message}`);
+    throw error;
+  }
+}
+
+// Resumable state for the "Rebuild saved order" maintenance tool.
+const REBUILD_STATE_KEY = 'nostalgia_rebuild_state';
+
+function loadRebuildState() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([REBUILD_STATE_KEY], (result) => {
+      const state = result[REBUILD_STATE_KEY];
+      if (state && typeof state === 'object' && Number.isFinite(state.nextOrder)) {
+        resolve({ cursor: state.cursor || '', nextOrder: state.nextOrder });
+      } else {
+        resolve(null);
+      }
+    });
+  });
+}
+
+function saveRebuildState(state) {
+  return new Promise((resolve) => {
+    chrome.storage.local.set({ [REBUILD_STATE_KEY]: state }, resolve);
+  });
+}
+
+function clearRebuildState() {
+  return new Promise((resolve) => {
+    chrome.storage.local.remove([REBUILD_STATE_KEY], resolve);
+  });
+}
+
+function updatePostsSavedOrder(updates) {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ action: 'REBUILD_SAVED_ORDER_BATCH', updates }, (response) => {
+      resolve(response || { success: false });
+    });
+  });
+}
+
+// Walk the entire saved feed top-to-bottom and reassign a fresh, strictly
+// descending savedOrder to existing posts (newest = highest), repairing order
+// that earlier sync bugs may have corrupted. Does NOT re-download thumbnails.
+async function rebuildSavedOrder() {
+  try {
+    isSyncing = true;
+
+    const isLoggedIn = await checkLoggedIn();
+    if (!isLoggedIn) {
+      chrome.runtime.sendMessage({
+        action: 'SYNC_LOGIN_REQUIRED',
+        error: 'You are not logged in to Instagram. Please log in and try again.'
+      });
+      isSyncing = false;
+      return { completed: false, status: SYNC_LOGIN_REQUIRED_STATUS };
+    }
+
+    totalSavedCount = await fetchTotalSavedCount();
+
+    const progressBarContainer = document.getElementById('progress-bar-container');
+    if (progressBarContainer) {
+      progressBarContainer.style.display = 'block';
+    }
+
+    const resume = await loadRebuildState();
+    // Newest gets the highest value; we count down as we walk older.
+    let nextOrder = resume ? resume.nextOrder : (totalSavedCount > 0 ? totalSavedCount : 1000000000);
+    let cursor = resume ? resume.cursor : '';
+    let processed = 0;
+    let moreAvailable = true;
+    let retryCount = 0;
+    let lastPersistAt = 0;
+
+    updateSyncProgress(processed, 0, totalSavedCount);
+
+    while (moreAvailable && isSyncing) {
+      try {
+        const page = await fetchSavedPosts(cursor);
+        if (!isSyncing) break;
+
+        const items = page.items || [];
+        if (items.length > 0) {
+          const updates = items.map((p) => ({
+            id: p.id || `${p.user?.username}-${p.code}`,
+            link: `https://www.instagram.com/p/${p.code}/`,
+            savedOrder: nextOrder--
+          }));
+          await updatePostsSavedOrder(updates);
+          processed += items.length;
+          updateSyncProgress(processed, 0, totalSavedCount);
+        }
+
+        cursor = page.next_max_id || '';
+        moreAvailable = page.more_available;
+
+        const now = Date.now();
+        if (now - lastPersistAt >= PROGRESS_SAVE_INTERVAL || !moreAvailable) {
+          await saveRebuildState({ cursor, nextOrder });
+          lastPersistAt = now;
+        }
+
+        if (!moreAvailable) break;
+        await syncDelay(500);
+        retryCount = 0;
+      } catch (error) {
+        if (!isSyncing) break;
+        console.error(`Error in rebuild fetch: ${error.message}`);
+        retryCount++;
+        if (retryCount > 3) break;
+        await syncDelay(5000);
+      }
+    }
+
+    const userStopped = !isSyncing;
+    const completed = !userStopped && !moreAvailable;
+
+    if (completed) {
+      // We walked the whole feed: order is now authoritative and backfill is done.
+      await clearRebuildState();
+      await saveSyncCursor({ backfillCursor: '', backfillComplete: true });
+      await clearProgress();
+    } else {
+      await saveRebuildState({ cursor, nextOrder });
+    }
+
+    isSyncing = false;
+    return { completed, processed };
+  } catch (error) {
+    isSyncing = false;
+    console.error(`Error rebuilding saved order: ${error.message}`);
     throw error;
   }
 }
@@ -1514,14 +1574,14 @@ chrome.runtime.onMessage.addListener(async (request) => {
         return;
       }
 
-      if (isSyncing) {
+      if (result.completed) {
         chrome.runtime.sendMessage({
           action: 'SYNC_FINISHED',
           syncedCount: result.syncedCount,
           failedCount: result.failedCount
         });
       } else {
-        // Sync was stopped
+        // Stopped by the user, or paused mid-backfill — resume is available.
         chrome.runtime.sendMessage({
           action: 'SYNC_STOPPED',
           syncedCount: result.syncedCount,
@@ -1535,13 +1595,29 @@ chrome.runtime.onMessage.addListener(async (request) => {
         error: error.message
       });
     }
+  } else if (request.action === 'START_REBUILD') {
+    try {
+      const result = await rebuildSavedOrder();
+
+      if (result?.status === SYNC_LOGIN_REQUIRED_STATUS) {
+        return;
+      }
+
+      chrome.runtime.sendMessage({
+        action: result.completed ? 'REBUILD_FINISHED' : 'REBUILD_STOPPED',
+        processed: result.processed || 0
+      });
+    } catch (error) {
+      console.error(`Error during rebuild: ${error.message}`);
+      chrome.runtime.sendMessage({ action: 'IMPORT_FAILED', error: error.message });
+    }
   } else if (request.action === 'SYNC_COMPLETE') {
     updateSyncDrawer(request.syncedCount, request.failedCount, false);
   } else if (request.action === 'IMPORT_INSTAGRAM_POSTS') {
     try {
       const result = await getInstagramSavedPosts();
 
-      if (!isSyncing) {
+      if (!result.completed) {
         updateSyncDrawer(result.syncedCount, result.failedCount, true);
       } else {
         chrome.runtime.sendMessage({

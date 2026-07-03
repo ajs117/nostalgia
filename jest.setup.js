@@ -114,7 +114,8 @@ global.window = {
 };
 
 global.URL = {
-  createObjectURL: jest.fn(() => 'blob:test-url')
+  createObjectURL: jest.fn(() => 'blob:test-url'),
+  revokeObjectURL: jest.fn()
 };
 
 global.fetch = jest.fn(() => Promise.resolve({

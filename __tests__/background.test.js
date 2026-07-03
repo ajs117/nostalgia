@@ -232,5 +232,166 @@ describe('Background script utilities', () => {
     expect(matchesFilters(post2, 'all', 'user', null)).toBe(true);
     expect(matchesFilters(post2, 'all', 'USER', null)).toBe(true);
   });
+
+  describe('paginated sort: lightweight projection + page re-fetch', () => {
+    // Mirrors the memory-optimized path in getPostsPaginated: instead of buffering
+    // every matched full record (with its base64 thumbnail) to sort, it buffers a
+    // lightweight projection, sorts that, then re-fetches the page's full records
+    // by primary key. These tests lock in the invariant that the optimized path
+    // returns the same page (and order) as sorting full records directly.
+
+    const stableHashString = (value) => {
+      let hash = 2166136261;
+      for (let i = 0; i < value.length; i++) {
+        hash ^= value.charCodeAt(i);
+        hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+      }
+      return hash >>> 0;
+    };
+
+    const comparePostsForStableRandom = (a, b, randomSeed) => {
+      const seed = Number.isFinite(randomSeed) ? Math.trunc(randomSeed) : 0;
+      const aIdentity = a.id || a.link || a.username || a.title || '';
+      const bIdentity = b.id || b.link || b.username || b.title || '';
+      const aWeight = stableHashString(`${seed}:${aIdentity}`);
+      const bWeight = stableHashString(`${seed}:${bIdentity}`);
+      if (aWeight !== bWeight) return aWeight - bWeight;
+      const fallbackA = `${aIdentity}:${a.timestamp || 0}`;
+      const fallbackB = `${bIdentity}:${b.timestamp || 0}`;
+      return fallbackA.localeCompare(fallbackB);
+    };
+
+    const sortFor = (mode, randomSeed) => (a, b) => {
+      if (mode === 'alphabetical') {
+        const ua = (a.username || '').toLowerCase();
+        const ub = (b.username || '').toLowerCase();
+        if (ua !== ub) return ua.localeCompare(ub);
+        return (a.title || '').toLowerCase().localeCompare((b.title || '').toLowerCase());
+      }
+      if (mode === 'random') return comparePostsForStableRandom(a, b, randomSeed);
+      return (b.timestamp || 0) - (a.timestamp || 0);
+    };
+
+    const project = (post) => ({
+      id: post.id,
+      link: post.link,
+      username: post.username,
+      title: post.title,
+      timestamp: post.timestamp
+    });
+
+    // Optimized implementation under test (pure, store modeled as a Map).
+    const paginateOptimized = (posts, mode, page, limit, randomSeed) => {
+      const store = new Map(posts.map((p) => [p.id, p]));
+      const projections = posts.map(project);
+      projections.sort(sortFor(mode, randomSeed));
+      const targetStart = (page - 1) * limit;
+      const pageKeys = projections.slice(targetStart, targetStart + limit).map((e) => e.id);
+      return {
+        posts: pageKeys.map((k) => store.get(k)).filter(Boolean),
+        total: projections.length,
+        hasMore: projections.length > targetStart + limit
+      };
+    };
+
+    // Reference: sort the full records directly.
+    const paginateReference = (posts, mode, page, limit, randomSeed) => {
+      const sorted = [...posts].sort(sortFor(mode, randomSeed));
+      const targetStart = (page - 1) * limit;
+      return {
+        posts: sorted.slice(targetStart, targetStart + limit),
+        total: sorted.length,
+        hasMore: sorted.length > targetStart + limit
+      };
+    };
+
+    const makePosts = (n) =>
+      Array.from({ length: n }, (_, i) => ({
+        id: `id-${i}`,
+        link: `https://www.instagram.com/p/code${i}/`,
+        username: `user${(n - i) % 7}`,
+        title: `Caption ${i} #tag${i % 3}`,
+        timestamp: 1000 + ((i * 37) % n),
+        thumbnail: 'data:image/jpeg;base64,'.padEnd(2000, 'A') // simulate large blob
+      }));
+
+    test.each(['alphabetical', 'random', 'default'])(
+      'optimized page matches reference for %s sort across pages',
+      (mode) => {
+        const posts = makePosts(53);
+        const limit = 20;
+        const seed = 12345;
+        for (let pageNum = 1; pageNum <= 3; pageNum++) {
+          const opt = paginateOptimized(posts, mode, pageNum, limit, seed);
+          const ref = paginateReference(posts, mode, pageNum, limit, seed);
+          expect(opt.total).toBe(ref.total);
+          expect(opt.hasMore).toBe(ref.hasMore);
+          expect(opt.posts.map((p) => p.id)).toEqual(ref.posts.map((p) => p.id));
+          // Re-fetched records are the full objects (thumbnail intact).
+          opt.posts.forEach((p) => expect(p.thumbnail).toBeTruthy());
+        }
+      }
+    );
+
+    test('page beyond the end returns empty', () => {
+      const posts = makePosts(10);
+      const opt = paginateOptimized(posts, 'default', 5, 20, 0);
+      expect(opt.posts).toEqual([]);
+      expect(opt.total).toBe(10);
+      expect(opt.hasMore).toBe(false);
+    });
+
+    test('projection drops the thumbnail before sorting', () => {
+      const [post] = makePosts(1);
+      expect(project(post)).not.toHaveProperty('thumbnail');
+    });
+  });
+
+  describe('sanitizeDownloadFilename', () => {
+    // Mirrors background.js sanitizeDownloadFilename: keeps '/' for subfolders
+    // but neutralizes path traversal and illegal filename characters.
+    const sanitizeDownloadFilename = (filename) => {
+      const sanitizeSegment = (segment) =>
+        Array.from(segment, (character) => {
+          const codePoint = character.charCodeAt(0);
+          if ('<>:"\\|?*'.includes(character) || codePoint < 32) {
+            return '-';
+          }
+          return character;
+        })
+          .join('')
+          .replace(/\s+/g, ' ')
+          .trim();
+
+      const segments = String(filename || 'nostalgia-media')
+        .split('/')
+        .map(sanitizeSegment)
+        .filter((segment) => segment && segment !== '.' && segment !== '..');
+
+      return segments.join('/').slice(0, 200) || 'nostalgia-media';
+    };
+
+    test('preserves an intended subfolder', () => {
+      expect(sanitizeDownloadFilename('nostalgia/user-abc123.jpg')).toBe('nostalgia/user-abc123.jpg');
+    });
+
+    test('strips path traversal segments', () => {
+      expect(sanitizeDownloadFilename('../../etc/passwd')).toBe('etc/passwd');
+      expect(sanitizeDownloadFilename('nostalgia/../../secret.mp4')).toBe('nostalgia/secret.mp4');
+    });
+
+    test('removes leading slashes (no absolute paths)', () => {
+      expect(sanitizeDownloadFilename('/nostalgia/x.jpg')).toBe('nostalgia/x.jpg');
+    });
+
+    test('replaces illegal filename characters within a segment', () => {
+      expect(sanitizeDownloadFilename('nostalgia/a<b>:c?.jpg')).toBe('nostalgia/a-b--c-.jpg');
+    });
+
+    test('falls back when everything is stripped', () => {
+      expect(sanitizeDownloadFilename('////')).toBe('nostalgia-media');
+      expect(sanitizeDownloadFilename('')).toBe('nostalgia-media');
+    });
+  });
 });
 

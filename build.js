@@ -114,7 +114,7 @@ async function build() {
   console.log('');
 
   // Copy and minify JS files
-  const jsFiles = ['background.js', 'contentScript.js', 'i18n.js', 'app.js'];
+  const jsFiles = ['background.js', 'syncOrdering.js', 'contentScript.js', 'i18n.js', 'app.js'];
   const originalSizes = {};
   const minifiedSizes = {};
 

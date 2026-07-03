@@ -97,7 +97,15 @@
       syncStatusLoginRequired: '{error} The Instagram tab was opened so you can sign in, then retry sync.',
       syncStatusError: 'Error: {error}',
       resumeDetailsWithTotal: '{synced} synced, {failed} failed of {total}',
-      resumeDetailsWithoutTotal: '{synced} synced, {failed} failed'
+      resumeDetailsWithoutTotal: '{synced} synced, {failed} failed',
+      maintenance: 'Maintenance',
+      rebuildOrder: 'Rebuild Saved Order',
+      rebuildOrderDescription: 'Re-read your saved posts from Instagram and fix the "Newest Saved" order without re-downloading thumbnails.',
+      rebuildConfirm: 'Rebuild the saved order? This opens Instagram in a background tab and re-reads all your saved posts to fix their order. Thumbnails are not re-downloaded.',
+      rebuilding: 'Rebuilding…',
+      rebuildBannerRunning: 'Rebuilding saved order… the grid will refresh when it finishes.',
+      syncBannerUpdating: 'Syncing new posts… the grid will refresh when it finishes.',
+      showNewPosts: 'Show new posts'
     },
     es: {
       documentTitle: 'nostalgia - Tus publicaciones guardadas',

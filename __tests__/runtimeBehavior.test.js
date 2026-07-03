@@ -240,14 +240,37 @@ function loadAppWindow(sendMessageImpl) {
 }
 
 describe('Runtime behavior', () => {
-  describe('contentScript.js resume progress', () => {
-    test('preserves the older-history cursor while scanning for newly saved posts', () => {
+  describe('contentScript.js resumable sync cursor', () => {
+    test('loadSyncCursor returns defaults when nothing is stored', async () => {
       const context = loadContentScriptContext();
+      context.chrome.storage.local.get.mockImplementation((keys, cb) => cb({}));
 
-      expect(vm.runInContext('getPersistedMaxIdForProgress(true, "older-history-cursor", "new-posts-scan-cursor")', context))
-        .toBe('older-history-cursor');
-      expect(vm.runInContext('getPersistedMaxIdForProgress(false, "older-history-cursor", "active-history-cursor")', context))
-        .toBe('active-history-cursor');
+      const state = await vm.runInContext('loadSyncCursor()', context);
+      expect(state).toEqual({ backfillCursor: '', backfillComplete: false });
+    });
+
+    test('loadSyncCursor restores a persisted backfill cursor', async () => {
+      const context = loadContentScriptContext();
+      context.chrome.storage.local.get.mockImplementation((keys, cb) =>
+        cb({ nostalgia_sync_cursor: { backfillCursor: 'older-history-cursor', backfillComplete: true } })
+      );
+
+      const state = await vm.runInContext('loadSyncCursor()', context);
+      expect(state).toEqual({ backfillCursor: 'older-history-cursor', backfillComplete: true });
+    });
+
+    test('saveSyncCursor writes the resumable state under its own key', async () => {
+      const context = loadContentScriptContext();
+      let written = null;
+      context.chrome.storage.local.set.mockImplementation((value, cb) => {
+        written = value;
+        if (cb) cb();
+      });
+
+      await vm.runInContext('saveSyncCursor({ backfillCursor: "deep-cursor", backfillComplete: false })', context);
+      expect(written).toEqual({
+        nostalgia_sync_cursor: { backfillCursor: 'deep-cursor', backfillComplete: false }
+      });
     });
 
     test('does not emit SYNC_STOPPED before the sync loop finishes cleanup', () => {

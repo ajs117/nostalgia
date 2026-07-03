@@ -77,16 +77,18 @@
     <div class="sync-panel-content">
       <p class="sync-description" data-i18n="syncDescription">Import your Instagram saved posts. Opens Instagram in a background tab.</p>
 
-      <div class="sync-info-notice">
-        <span class="info-icon">ℹ️</span>
-        <span class="info-text" data-i18n="syncBackgroundNotice">You can close this page and browse normally - the sync will continue in the background!</span>
+      <div class="sync-notices">
+        <div class="sync-info-notice">
+          <span class="info-icon">ℹ️</span>
+          <span class="info-text" data-i18n="syncBackgroundNotice">You can close this page and browse normally - the sync will continue in the background!</span>
+        </div>
+
+        <div class="sync-login-notice">
+          <span class="notice-icon">⚠️</span>
+          <span class="notice-text" data-i18n="syncLoginNotice">Please make sure you are logged into Instagram before starting the sync. Keep the Instagram tab open while syncing!</span>
+        </div>
       </div>
 
-      <div class="sync-login-notice">
-        <span class="notice-icon">⚠️</span>
-        <span class="notice-text" data-i18n="syncLoginNotice">Please make sure you are logged into Instagram before starting the sync. Keep the Instagram tab open while syncing!</span>
-      </div>
-      
       <div id="sync-resume-info" class="sync-resume-info" style="display: none;">
         <span class="resume-icon">⏸️</span>
         <div class="resume-text">
@@ -137,18 +139,31 @@
         </div>
       </div>
 
-      <div class="sync-danger-zone">
-        <h4 data-i18n="dangerZone">Danger Zone</h4>
-        <p data-i18n="clearDataDescription">Permanently delete all synced posts from local storage.</p>
-        <button id="clear-all-data-btn" class="clear-all-data-btn">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-            <polyline points="3 6 5 6 21 6"/>
-            <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/>
-            <line x1="10" y1="11" x2="10" y2="17"/>
-            <line x1="14" y1="11" x2="14" y2="17"/>
-          </svg>
-          <span data-i18n="clearAllData">Clear All Data</span>
-        </button>
+      <div class="sync-footer-zones">
+        <div class="sync-maintenance-zone">
+          <h4 data-i18n="maintenance">Maintenance</h4>
+          <p data-i18n="rebuildOrderDescription">Re-read your saved posts from Instagram and fix the "Newest Saved" order without re-downloading thumbnails.</p>
+          <button id="rebuild-order-btn" class="rebuild-order-btn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+              <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0118.8-4.3M22 12.5a10 10 0 01-18.8 4.3"/>
+            </svg>
+            <span data-i18n="rebuildOrder">Rebuild Saved Order</span>
+          </button>
+        </div>
+
+        <div class="sync-danger-zone">
+          <h4 data-i18n="dangerZone">Danger Zone</h4>
+          <p data-i18n="clearDataDescription">Permanently delete all synced posts from local storage.</p>
+          <button id="clear-all-data-btn" class="clear-all-data-btn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+              <polyline points="3 6 5 6 21 6"/>
+              <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/>
+              <line x1="10" y1="11" x2="10" y2="17"/>
+              <line x1="14" y1="11" x2="14" y2="17"/>
+            </svg>
+            <span data-i18n="clearAllData">Clear All Data</span>
+          </button>
+        </div>
       </div>
     </div>
   </div>
@@ -216,6 +231,9 @@
 
       <!-- Sync Status -->
       <div id="sync-status" class="sync-status"></div>
+
+      <!-- Live-sync banner (keeps the grid stable while syncing) -->
+      <div id="sync-grid-banner" class="sync-grid-banner" style="display: none;"></div>
 
       <!-- Stats Bar -->
       <div class="stats-bar">

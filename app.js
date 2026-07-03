@@ -19,6 +19,7 @@ let modalMediaCache = new Map();
 let latestLoadRequestId = 0;
 let totalPosts = 0;
 let isSyncing = false;
+let isRebuilding = false;
 let lastKnownSyncTotal = 0;
 let currentTheme = 'dark';
 let currentLanguage = 'en';
@@ -627,15 +628,22 @@ function handleRandomReshuffle() {
 function setupMessageListener() {
   chrome.runtime.onMessage.addListener((request) => {
     if (request.action === 'UPDATE_ITEMS') {
-      // Don't reset page during sync - preserve user's current page position
-      loadPosts();
-      scheduleFetchAllHashtags(); // Refresh hashtags when posts are updated (debounced)
+      // While a sync/rebuild is running, posts are being inserted/reordered
+      // continuously. Reloading the grid on every update makes items jump
+      // between pages, so we keep the view stable and show a banner instead.
+      if (isSyncing || isRebuilding) {
+        setSyncGridBanner(true);
+      } else {
+        loadPosts();
+        scheduleFetchAllHashtags(); // Refresh hashtags when posts are updated (debounced)
+      }
     } else if (request.action === 'SYNC_STARTED') {
       handleSyncStarted();
     } else if (request.action === 'SYNC_PROGRESS') {
       updateSyncPanelProgress(request.synced, request.failed, request.total);
     } else if (request.action === 'SYNC_COMPLETE') {
       handleSyncComplete(request.syncedCount, request.failedCount);
+      setSyncGridBanner(false);
       currentPage = 1;
       loadPosts();
       scheduleFetchAllHashtags(); // Refresh hashtags after sync (debounced)
@@ -644,10 +652,86 @@ function setupMessageListener() {
     } else if (request.action === 'IMPORT_FAILED') {
       handleSyncError(request.error || 'Sync failed. Please try again.');
     } else if (request.action === 'SYNC_STOPPED') {
+      setSyncGridBanner(false);
       handleSyncStopped(request.syncedCount, request.failedCount);
+    } else if (request.action === 'REBUILD_STARTED') {
+      handleRebuildStarted();
+    } else if (request.action === 'REBUILD_COMPLETE') {
+      handleRebuildComplete();
+    } else if (request.action === 'REBUILD_STOPPED') {
+      handleRebuildComplete();
     }
     return true;
   });
+}
+
+// Keep the grid stable while a sync/rebuild is mutating order in the background.
+function setSyncGridBanner(visible) {
+  const banner = document.getElementById('sync-grid-banner');
+  if (!banner) return;
+
+  if (visible) {
+    if (banner.dataset.active === 'true') return;
+    banner.dataset.active = 'true';
+    banner.innerHTML = '';
+
+    const label = document.createElement('span');
+    label.textContent = isRebuilding ? t('rebuildBannerRunning') : t('syncBannerUpdating');
+    banner.appendChild(label);
+
+    const refresh = document.createElement('button');
+    refresh.className = 'sync-banner-refresh';
+    refresh.textContent = t('showNewPosts');
+    refresh.addEventListener('click', () => {
+      currentPage = 1;
+      loadPosts();
+    });
+    banner.appendChild(refresh);
+
+    banner.style.display = 'flex';
+  } else {
+    banner.dataset.active = 'false';
+    banner.style.display = 'none';
+    banner.innerHTML = '';
+  }
+}
+
+function handleRebuildStarted() {
+  isRebuilding = true;
+  setSyncGridBanner(true);
+  const btn = document.getElementById('rebuild-order-btn');
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = buildButtonMarkup(t('rebuilding'), getSpinnerIconMarkup(16));
+  }
+  updateLocalizedSyncStatus('syncing', 'rebuilding');
+}
+
+function handleRebuildComplete() {
+  isRebuilding = false;
+  setSyncGridBanner(false);
+  const btn = document.getElementById('rebuild-order-btn');
+  if (btn) {
+    btn.disabled = false;
+    btn.innerHTML = buildButtonMarkup(t('rebuildOrder'), getSyncIconMarkup());
+  }
+  updateSyncStatus('', '');
+  currentPage = 1;
+  loadPosts();
+}
+
+function startRebuild() {
+  if (isSyncing || isRebuilding) return;
+  if (!confirm(t('rebuildConfirm'))) return;
+
+  isRebuilding = true;
+  const btn = document.getElementById('rebuild-order-btn');
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = buildButtonMarkup(t('rebuilding'), getSpinnerIconMarkup(16));
+  }
+  updateLocalizedSyncStatus('syncing', 'rebuilding');
+  chrome.runtime.sendMessage({ action: 'REBUILD_SAVED_ORDER' });
 }
 
 // Search handlers
@@ -1171,9 +1255,12 @@ function getPrimaryMediaForPost(post) {
     };
   }
 
+  // Prefer the full-resolution image fetched on modal open (cached, never stored
+  // to IndexedDB) so downloads aren't limited to the compressed thumbnail.
+  const cachedMedia = modalMediaCache.get(getModalCacheKey(post));
   return {
     isVideo: false,
-    url: post.image || post.thumbnail || null,
+    url: cachedMedia?.url || post.image || post.thumbnail || null,
     extension: 'jpg'
   };
 }
@@ -1855,6 +1942,11 @@ function setupSyncPanel() {
     clearAllDataBtn.addEventListener('click', clearAllData);
   }
 
+  const rebuildOrderBtn = document.getElementById('rebuild-order-btn');
+  if (rebuildOrderBtn) {
+    rebuildOrderBtn.addEventListener('click', startRebuild);
+  }
+
   // Check for saved progress on load
   checkSyncProgress();
 }
@@ -1952,8 +2044,8 @@ function clearAllData() {
 
   chrome.runtime.sendMessage({ action: 'CLEAR_ALL_POSTS' }, (response) => {
     if (response && response.success) {
-      // Also clear sync progress
-      chrome.storage.local.remove(['instagram_sync_progress'], () => {
+      // Also clear sync progress and resumable cursor/rebuild state
+      chrome.storage.local.remove(['instagram_sync_progress', 'nostalgia_sync_cursor', 'nostalgia_rebuild_state'], () => {
         // Reset UI state
         allPosts = [];
         displayedPosts = [];
@@ -1989,6 +2081,7 @@ function clearAllData() {
 
 function startSync() {
   isSyncing = true;
+  setSyncGridBanner(true);
   const startBtn = document.getElementById('sync-start-btn');
   const stopBtn = document.getElementById('sync-stop-btn');
   const progressSection = document.getElementById('sync-progress-section');

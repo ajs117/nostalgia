@@ -6,7 +6,6 @@ declare global {
     index: number;
     isVideo: boolean;
     imageUrl: string | null;
-    videoVersions: unknown[] | null;
     width: number;
     height: number;
   }
@@ -16,6 +15,7 @@ declare global {
     link?: string;
     url?: string;
     thumbnail?: string | null;
+    thumbnailKey?: string | null;
     image?: string | null;
     title?: string;
     username?: string;

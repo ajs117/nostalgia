@@ -139,18 +139,27 @@ function safeBroadcast(message) {
 }
 
 function sanitizeDownloadFilename(filename) {
-  const sanitized = Array.from(filename || 'nostalgia-media', (character) => {
-    const codePoint = character.charCodeAt(0);
-    if ('<>:"/\\|?*'.includes(character) || codePoint < 32) {
-      return '-';
-    }
-    return character;
-  }).join('');
+  // Sanitize each path segment but keep '/' so callers can target a subfolder
+  // (e.g. "nostalgia/<file>"). Drop traversal ('..') and empty segments so the
+  // download can't escape the Downloads directory.
+  const sanitizeSegment = (segment) =>
+    Array.from(segment, (character) => {
+      const codePoint = character.charCodeAt(0);
+      if ('<>:"\\|?*'.includes(character) || codePoint < 32) {
+        return '-';
+      }
+      return character;
+    })
+      .join('')
+      .replace(/\s+/g, ' ')
+      .trim();
 
-  return sanitized
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 160) || 'nostalgia-media';
+  const segments = String(filename || 'nostalgia-media')
+    .split('/')
+    .map(sanitizeSegment)
+    .filter((segment) => segment && segment !== '.' && segment !== '..');
+
+  return segments.join('/').slice(0, 200) || 'nostalgia-media';
 }
 
 function waitForTabToComplete(tabId) {
@@ -314,7 +323,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     const hashtagFilter = request.hashtagFilter || null;
     const randomSeed = Number.isFinite(request.randomSeed) ? request.randomSeed : null;
 
-    getPostsPaginated(page, limit, sortBy, filterType, searchQuery, hashtagFilter, randomSeed).then((result) => {
+    getPostsPaginated(page, limit, sortBy, filterType, searchQuery, hashtagFilter, randomSeed).then(async (result) => {
+      // Thumbnails are stored as binary blobs; rehydrate the page's records to
+      // data URLs here so the viewer's render path stays unchanged.
+      result.posts = await hydrateThumbnails(result.posts);
       sendResponse({
         success: true,
         posts: result.posts,
@@ -472,6 +484,57 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return false;
   }
 
+  if (request.action === 'REBUILD_SAVED_ORDER') {
+    // Open Instagram in a background tab and walk the feed to repair saved order.
+    chrome.tabs.create({ url: 'https://www.instagram.com/', active: false }, (tab) => {
+      activeInstagramTabId = tab.id;
+
+      chrome.tabs.onUpdated.addListener(function listener(tabId, info) {
+        if (tabId === tab.id && info.status === 'complete') {
+          setTimeout(() => {
+            safeSendToTab(tabId, { action: 'START_REBUILD' });
+          }, 1500);
+          chrome.tabs.onUpdated.removeListener(listener);
+        }
+      });
+    });
+    safeBroadcast({ action: 'REBUILD_STARTED' });
+    return false;
+  }
+
+  if (request.action === 'REBUILD_SAVED_ORDER_BATCH') {
+    updatePostsSavedOrder(request.updates || [])
+      .then((updated) => {
+        updateExtensionTab(false);
+        sendResponse({ success: true, updated });
+      })
+      .catch((error) => {
+        console.error('Error updating saved order:', error);
+        sendResponse({ success: false, error: error.message });
+      });
+    return true;
+  }
+
+  if (request.action === 'REBUILD_FINISHED' || request.action === 'REBUILD_STOPPED') {
+    const message = {
+      action: request.action === 'REBUILD_FINISHED' ? 'REBUILD_COMPLETE' : 'REBUILD_STOPPED',
+      processed: request.processed || 0
+    };
+    safeBroadcast(message);
+    if (activeInstagramTabId) {
+      setTimeout(() => {
+        if (activeInstagramTabId) {
+          chrome.tabs.remove(activeInstagramTabId, () => {
+            if (chrome.runtime.lastError) { /* tab may already be closed */ }
+            activeInstagramTabId = null;
+          });
+        }
+      }, 500);
+    }
+    setTimeout(() => updateExtensionTab(true), 500);
+    return false;
+  }
+
   if (request.action === 'START_SYNC') {
     if (activeInstagramTabId) {
       chrome.storage.local.get(['instagram_sync_progress'], () => {
@@ -533,6 +596,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           sendResponse({ success: true, added: 0 });
           return;
         }
+
+        // Store thumbnails as binary blobs (smaller on disk than inline base64)
+        // and replace the inline data URL with a lightweight key reference.
+        await migrateThumbnailsToBlobs(newPosts);
 
         // Add posts in batch for better performance
         const addedCount = await addPostsToIndexedDB(newPosts);
@@ -1814,13 +1881,49 @@ async function getPostsPaginated(page = 1, limit = 50, sortBy = 'newest-saved', 
               sorted.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
             }
 
-            const sliced = sorted.slice(targetStart, targetEndExclusive);
-            db.close();
-            resolve({
-              posts: sliced,
-              total: sorted.length,
-              hasMore: sorted.length > targetEndExclusive,
-              page
+            // Re-fetch the full records for just the current page (sorted holds
+            // lightweight projections, not the stored thumbnails).
+            const pageKeys = sorted.slice(targetStart, targetEndExclusive).map((entry) => entry.id);
+            const totalSorted = sorted.length;
+
+            if (pageKeys.length === 0) {
+              db.close();
+              resolve({
+                posts: [],
+                total: totalSorted,
+                hasMore: totalSorted > targetEndExclusive,
+                page
+              });
+              return;
+            }
+
+            const pageRecords = new Array(pageKeys.length);
+            let fetched = 0;
+            let settled = false;
+
+            const finishPageFetch = () => {
+              if (settled) return;
+              settled = true;
+              db.close();
+              resolve({
+                posts: pageRecords.filter(Boolean),
+                total: totalSorted,
+                hasMore: totalSorted > targetEndExclusive,
+                page
+              });
+            };
+
+            pageKeys.forEach((key, idx) => {
+              const getReq = store.get(key);
+              getReq.onsuccess = () => {
+                pageRecords[idx] = getReq.result;
+                fetched++;
+                if (fetched === pageKeys.length) finishPageFetch();
+              };
+              getReq.onerror = () => {
+                fetched++;
+                if (fetched === pageKeys.length) finishPageFetch();
+              };
             });
             return;
           }
@@ -1834,7 +1937,16 @@ async function getPostsPaginated(page = 1, limit = 50, sortBy = 'newest-saved', 
               }
               totalMatched++;
             } else {
-              allMatchedPosts.push(post);
+              // Buffer only the fields needed for sorting (plus the primary key
+              // for re-fetch). Avoids holding every post's base64 thumbnail in
+              // memory while sorting large filtered sets.
+              allMatchedPosts.push({
+                id: post.id,
+                link: post.link,
+                username: post.username,
+                title: post.title,
+                timestamp: post.timestamp
+              });
               totalMatched++;
             }
           }
@@ -1875,6 +1987,107 @@ async function storeMediaInIndexedDB(key, blob) {
     if (db) db.close();
     throw error;
   }
+}
+
+// Store several media blobs in a single transaction (used for thumbnail batches).
+async function storeMediaBatch(entries) {
+  if (!entries || entries.length === 0) return;
+  let db;
+  try {
+    db = await openDB();
+    await new Promise((resolve, reject) => {
+      const transaction = db.transaction([STORE_MEDIA], 'readwrite');
+      const store = transaction.objectStore(STORE_MEDIA);
+      entries.forEach(({ key, blob }) => store.put(blob, key));
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+    });
+  } finally {
+    if (db) db.close();
+  }
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error || new Error('Failed to read blob'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function dataUrlToBlob(dataUrl) {
+  const response = await fetch(dataUrl);
+  return response.blob();
+}
+
+// Convert inline base64 thumbnails to binary blobs stored under `thumb_<id>`,
+// replacing the inline data URL with a `thumbnailKey` reference. On any failure
+// the inline base64 is left intact as a fallback (so the post still renders).
+async function migrateThumbnailsToBlobs(posts) {
+  const entries = [];
+  for (const post of posts) {
+    if (post && typeof post.thumbnail === 'string' && post.thumbnail.startsWith('data:')) {
+      try {
+        const blob = await dataUrlToBlob(post.thumbnail);
+        if (blob && blob.size > 0) {
+          const key = `thumb_${post.id}`;
+          entries.push({ key, blob });
+          post.thumbnailKey = key;
+          delete post.thumbnail;
+        }
+      } catch (error) {
+        // Keep the inline base64 as a fallback.
+      }
+    }
+  }
+  if (entries.length > 0) {
+    await storeMediaBatch(entries);
+  }
+}
+
+// Read stored thumbnail blobs for a page of posts and attach them as data URLs.
+// Posts that already carry an inline thumbnail (legacy records) are left as-is.
+async function hydrateThumbnails(posts) {
+  if (!Array.isArray(posts) || posts.length === 0) return posts;
+  const needing = posts.filter((p) => p && !p.thumbnail && p.thumbnailKey);
+  if (needing.length === 0) return posts;
+
+  let db;
+  try {
+    db = await openDB();
+    const blobsByKey = await new Promise((resolve, reject) => {
+      const transaction = db.transaction([STORE_MEDIA], 'readonly');
+      const store = transaction.objectStore(STORE_MEDIA);
+      const map = new Map();
+      needing.forEach((p) => {
+        const req = store.get(p.thumbnailKey);
+        req.onsuccess = () => {
+          if (req.result) map.set(p.thumbnailKey, req.result);
+        };
+        req.onerror = () => { /* missing blob -> placeholder */ };
+      });
+      transaction.oncomplete = () => resolve(map);
+      transaction.onerror = () => reject(transaction.error);
+    });
+
+    await Promise.all(needing.map(async (p) => {
+      const blob = blobsByKey.get(p.thumbnailKey);
+      if (blob) {
+        try {
+          p.thumbnail = await blobToDataUrl(blob);
+        } catch (error) {
+          // Leave without a thumbnail; the viewer shows a placeholder.
+        }
+      }
+    }));
+  } catch (error) {
+    console.error('Error hydrating thumbnails:', error);
+  } finally {
+    if (db) db.close();
+  }
+
+  return posts;
 }
 
 async function storeCollectionsInIndexedDB(collections) {
@@ -2130,6 +2343,59 @@ async function getAllHashtagsWithCounts() {
     if (db) db.close();
     console.error('Error in getAllHashtagsWithCounts:', error);
     return Promise.resolve([]);
+  }
+}
+
+// Overwrite savedOrder for existing posts (used by the "Rebuild saved order"
+// tool). Matches by id, then by link; never re-downloads thumbnails.
+async function updatePostsSavedOrder(updates) {
+  if (!updates || updates.length === 0) return 0;
+  let db;
+  try {
+    db = await openDB();
+    return await new Promise((resolve, reject) => {
+      const transaction = db.transaction([STORE_POSTS], 'readwrite');
+      const store = transaction.objectStore(STORE_POSTS);
+      const linkIndex = store.index('link');
+      let updated = 0;
+
+      updates.forEach((update) => {
+        if (!update || update.savedOrder === undefined) return;
+        const getRequest = store.get(update.id);
+        getRequest.onsuccess = () => {
+          const post = getRequest.result;
+          if (post) {
+            post.savedOrder = update.savedOrder;
+            store.put(post);
+            updated++;
+          } else if (update.link) {
+            const linkRequest = linkIndex.get(update.link);
+            linkRequest.onsuccess = () => {
+              const byLink = linkRequest.result;
+              if (byLink) {
+                byLink.savedOrder = update.savedOrder;
+                store.put(byLink);
+                updated++;
+              }
+            };
+            linkRequest.onerror = () => { /* skip */ };
+          }
+        };
+        getRequest.onerror = () => { /* skip */ };
+      });
+
+      transaction.oncomplete = () => {
+        db.close();
+        resolve(updated);
+      };
+      transaction.onerror = () => {
+        db.close();
+        reject(transaction.error);
+      };
+    });
+  } catch (error) {
+    if (db) db.close();
+    throw error;
   }
 }
 

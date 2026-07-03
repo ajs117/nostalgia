@@ -1746,8 +1746,11 @@ select:hover {
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%) scale(0.95);
-  width: 420px;
-  max-width: 90vw;
+  width: 560px;
+  max-width: 92vw;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: var(--radius-xl);
@@ -1804,8 +1807,46 @@ select:hover {
   transform: scale(1.1);
 }
 
+.sync-panel-header {
+  flex-shrink: 0;
+}
+
 .sync-panel-content {
   padding: 24px;
+  overflow-y: auto;
+}
+
+/* Two-column groupings to keep the panel short enough for the viewport */
+.sync-notices {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.sync-notices .sync-info-notice,
+.sync-notices .sync-login-notice {
+  margin-bottom: 0;
+  align-items: flex-start;
+}
+
+.sync-footer-zones {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.sync-footer-zones .sync-maintenance-zone,
+.sync-footer-zones .sync-danger-zone {
+  margin-top: 20px;
+  padding-top: 16px;
+}
+
+@media (max-width: 560px) {
+  .sync-notices,
+  .sync-footer-zones {
+    grid-template-columns: 1fr;
+  }
 }
 
 .sync-description {
@@ -2166,4 +2207,86 @@ select:hover {
 
 .clear-all-data-btn:active {
   background: rgba(255, 71, 87, 0.2);
+}
+
+/* Maintenance zone (Rebuild saved order) */
+.sync-maintenance-zone {
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+}
+
+.sync-maintenance-zone h4 {
+  margin: 0 0 8px 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.sync-maintenance-zone p {
+  margin: 0 0 16px 0;
+  font-size: 13px;
+  color: var(--text-tertiary);
+  line-height: 1.4;
+}
+
+.rebuild-order-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  padding: 12px 16px;
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: var(--transition-fast);
+}
+
+.rebuild-order-btn:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-primary);
+}
+
+.rebuild-order-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Live-sync grid banner */
+.sync-grid-banner {
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  border-radius: var(--radius-md);
+  background: rgba(252, 176, 69, 0.1);
+  border: 1px solid rgba(252, 176, 69, 0.3);
+  color: var(--accent-orange);
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.sync-banner-refresh {
+  flex-shrink: 0;
+  padding: 6px 14px;
+  background: var(--accent-orange);
+  color: #1a1a1a;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: var(--transition-fast);
+}
+
+.sync-banner-refresh:hover {
+  opacity: 0.9;
 }

@@ -13,6 +13,7 @@
    "content_scripts": [
       {
          "js": [
+            "syncOrdering.js",
             "contentScript.js"
          ],
          "matches": [
@@ -43,7 +44,7 @@
       "scripting",
       "tabs"
    ],
-   "version": "2.0.0",
+   "version": "2.1.1",
    "web_accessible_resources": [
       {
          "matches": [
