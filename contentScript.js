@@ -1694,19 +1694,55 @@ chrome.runtime.onMessage.addListener(async (request) => {
 });
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  if (request.action !== 'ADD_POST_TO_NOSTALGIA_COLLECTION') {
-    return false;
+  if (request.action === 'ADD_POST_TO_NOSTALGIA_COLLECTION') {
+    addPostToNostalgiaCollection(request.post)
+      .then((response) => sendResponse(response))
+      .catch((error) => {
+        console.error('Error adding post to nostalgia collection:', error);
+        sendResponse({ success: false, error: error.message });
+      });
+    return true;
   }
 
-  addPostToNostalgiaCollection(request.post)
-    .then((response) => sendResponse(response))
-    .catch((error) => {
-      console.error('Error adding post to nostalgia collection:', error);
-      sendResponse({ success: false, error: error.message });
-    });
+  if (request.action === 'BUMP_POST_TO_TOP') {
+    bumpPostOnInstagram(request.post)
+      .then((response) => sendResponse(response))
+      .catch((error) => {
+        console.error('Error bumping post on Instagram:', error);
+        sendResponse({ success: false, error: error.message });
+      });
+    return true;
+  }
 
-  return true;
+  return false;
 });
+
+// Unsave then immediately re-save a post so Instagram re-sorts it to the top of
+// the saved feed (that's how the feed orders: most recently saved first). This
+// is what makes it reappear at the top on the user's phone. Note: unsaving also
+// drops it from any custom collections; it comes back only to the main saved
+// feed.
+async function bumpPostOnInstagram(post) {
+  if (!post || !post.id) {
+    throw new Error('Post metadata is incomplete');
+  }
+
+  const body = new URLSearchParams({
+    radio_type: 'wifi-none',
+    module_name: 'nostalgia_extension'
+  }).toString();
+  const headers = { 'content-type': 'application/x-www-form-urlencoded; charset=UTF-8' };
+
+  await instagramApiRequest(`https://i.instagram.com/api/v1/media/${post.id}/unsave/`, {
+    method: 'POST', headers, body, redirect: 'error'
+  });
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  await instagramApiRequest(`https://i.instagram.com/api/v1/media/${post.id}/save/`, {
+    method: 'POST', headers, body, redirect: 'error'
+  });
+
+  return { success: true };
+}
 
 // Sync drawer removed - sync is now handled entirely in the main app
 // No drawer should be shown on Instagram pages

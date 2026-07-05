@@ -160,6 +160,85 @@ function toggleModalAutoplay() {
   preloadUpcomingModalMedia();
 }
 
+// Flip a post's `unavailable` state in memory, in the DB, and on its grid tile.
+function setPostUnavailableState(post, unavailable) {
+  if (!post || !!post.unavailable === unavailable) return;
+
+  if (unavailable) post.unavailable = true; else delete post.unavailable;
+
+  chrome.runtime.sendMessage({
+    action: 'SET_POST_UNAVAILABLE',
+    postId: post.id,
+    unavailable
+  });
+
+  const card = document.querySelector(`.post-card[data-post-id="${post.id}"]`);
+  if (card) {
+    card.classList.toggle('unavailable', unavailable);
+    const media = card.querySelector('.post-media');
+    const existing = card.querySelector('.post-unavailable-badge');
+    if (unavailable && media && !existing) {
+      const badge = document.createElement('div');
+      badge.className = 'post-unavailable-badge';
+      badge.textContent = t('unavailableBadge');
+      media.appendChild(badge);
+    } else if (!unavailable && existing) {
+      existing.remove();
+    }
+  }
+}
+
+// Shown in the modal media area when Instagram has deleted the post. Offers a
+// one-click removal from the local library (the only destructive path -- no
+// auto-delete).
+function renderUnavailableState(container, post) {
+  container.innerHTML = '';
+
+  const wrap = document.createElement('div');
+  wrap.className = 'modal-unavailable';
+
+  const icon = document.createElement('div');
+  icon.className = 'modal-unavailable-icon';
+  icon.textContent = '🚫';
+  wrap.appendChild(icon);
+
+  const msg = document.createElement('p');
+  msg.className = 'modal-unavailable-text';
+  msg.textContent = t('postUnavailable');
+  wrap.appendChild(msg);
+
+  const removeBtn = document.createElement('button');
+  removeBtn.type = 'button';
+  removeBtn.className = 'modal-unavailable-remove';
+  removeBtn.textContent = t('removeFromLibrary');
+  removeBtn.addEventListener('click', () => removePostFromLibrary(post, removeBtn));
+  wrap.appendChild(removeBtn);
+
+  container.appendChild(wrap);
+}
+
+function removePostFromLibrary(post, btn) {
+  if (!post || !post.id) return;
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = t('removing');
+  }
+
+  chrome.runtime.sendMessage({ action: 'DELETE_SINGLE_POST', postId: post.id }, (response) => {
+    if (response && response.success) {
+      allPosts = allPosts.filter((p) => p.id !== post.id);
+      totalPosts = Math.max(0, totalPosts - 1);
+      closeModal();
+      loadPosts();
+      updateStats();
+    } else if (btn) {
+      btn.disabled = false;
+      btn.textContent = t('removeFromLibrary');
+      alert(response?.error || t('removeFailed'));
+    }
+  });
+}
+
 function getLoopButtonLabel() {
   return currentLoopEnabled ? t('loopOn') : t('loopOff');
 }
@@ -386,21 +465,13 @@ function createVideoElement(src) {
   video.src = src;
   video.preload = 'auto';
 
-  // Restore volume preference
+  // Restore the last volume level, but always start with sound on. Opening the
+  // modal is a user gesture, so unmuted autoplay is permitted; attemptPlay()
+  // falls back to muted only if the browser still blocks it (e.g. auto-advance
+  // outside a gesture). This is what makes reels play at full volume by default.
   const savedVolume = localStorage.getItem('video_volume');
-  const savedMuted = localStorage.getItem('video_muted');
-
-  if (savedVolume !== null) {
-    video.volume = parseFloat(savedVolume);
-  } else {
-    video.volume = 1.0;
-  }
-
-  if (savedMuted !== null) {
-    video.muted = savedMuted === 'true';
-  } else {
-    video.muted = true; // Default to muted for auto-play policy compatibility
-  }
+  video.volume = savedVolume !== null ? parseFloat(savedVolume) : 1.0;
+  video.muted = false;
 
   video.style.width = '100%';
   video.style.height = '100%';
@@ -421,6 +492,16 @@ function createVideoElement(src) {
     video.parentElement.innerHTML = `<div class="media-error">${t('failedToLoadVideo')}</div>`;
   };
   return video;
+}
+
+// Play preferring sound; if the browser blocks unmuted autoplay (no active
+// gesture), retry muted so the video still plays rather than freezing.
+function attemptPlay(video) {
+  if (!video) return;
+  video.play().catch(() => {
+    video.muted = true;
+    video.play().catch(() => { });
+  });
 }
 
 function createImageElement(src) {
@@ -547,10 +628,12 @@ function initializeEventListeners() {
   const collectionBtn = document.getElementById('modal-collection-btn');
   const autoplayBtn = document.getElementById('modal-autoplay-btn');
   const loopBtn = document.getElementById('modal-loop-btn');
+  const bumpBtn = document.getElementById('modal-bump-btn');
   if (downloadBtn) downloadBtn.addEventListener('click', downloadCurrentMedia);
   if (collectionBtn) collectionBtn.addEventListener('click', addCurrentPostToCollection);
   if (autoplayBtn) autoplayBtn.addEventListener('click', toggleModalAutoplay);
   if (loopBtn) loopBtn.addEventListener('click', toggleModalLoop);
+  if (bumpBtn) bumpBtn.addEventListener('click', bumpCurrentPostToTop);
 
   // Keyboard navigation
   document.addEventListener('keydown', (e) => {
@@ -1124,9 +1207,17 @@ function createPostCard(post, index) {
   card.className = 'post-card';
   card.dataset.index = index;
   card.dataset.postId = post.id;
+  if (post.unavailable) card.classList.add('unavailable');
 
   const mediaContainer = document.createElement('div');
   mediaContainer.className = 'post-media';
+
+  if (post.unavailable) {
+    const badge = document.createElement('div');
+    badge.className = 'post-unavailable-badge';
+    badge.textContent = t('unavailableBadge');
+    mediaContainer.appendChild(badge);
+  }
 
   // Display thumbnail
   const imgSrc = post.image || post.thumbnail;
@@ -1380,6 +1471,29 @@ function addCurrentPostToCollection() {
   });
 }
 
+function bumpCurrentPostToTop() {
+  const post = getCurrentModalPost();
+  if (!post) return;
+
+  updateModalActionState('modal-bump-btn', t('bumping'), true);
+  chrome.runtime.sendMessage({
+    action: 'BUMP_POST_TO_TOP',
+    post: { id: post.id, link: post.link }
+  }, (response) => {
+    if (response && response.success) {
+      updateModalActionState('modal-bump-btn', t('bumpedToTop'));
+      // Reflect the new order locally without a full reload.
+      if (typeof response.savedOrder === 'number') {
+        post.savedOrder = response.savedOrder;
+      }
+    } else {
+      updateModalActionState('modal-bump-btn', response?.error || t('bumpFailed'));
+    }
+
+    setTimeout(() => updateModalActionState('modal-bump-btn', t('bumpToTop'), false), 2200);
+  });
+}
+
 function preloadPrimaryVideo(post) {
   if (!post || !post.isVideo || !post.link) return;
 
@@ -1486,6 +1600,7 @@ function openModal(index, carouselIdx = 0) {
   const loopBtn = document.getElementById('modal-loop-btn');
   const downloadBtn = document.getElementById('modal-download-btn');
   const collectionBtn = document.getElementById('modal-collection-btn');
+  const bumpBtn = document.getElementById('modal-bump-btn');
   const hashtagsEl = document.getElementById('modal-hashtags');
 
   mediaContainer.innerHTML = '';
@@ -1522,6 +1637,11 @@ function openModal(index, carouselIdx = 0) {
   if (collectionBtn) {
     collectionBtn.disabled = false;
     collectionBtn.textContent = t('addToCollection');
+  }
+
+  if (bumpBtn) {
+    bumpBtn.disabled = false;
+    bumpBtn.textContent = t('bumpToTop');
   }
 
   updateModalAutoplayButton(post);
@@ -1672,7 +1792,7 @@ function loadCarouselSlide(idx, post) {
     // preference below -- that setting only controls whether playback
     // continues on to the next item/post once this one ends.
     if (idx === currentCarouselIndex) {
-      video.play().catch(() => { });
+      attemptPlay(video);
     }
 
     preloadCarouselVideo(post, idx + 1);
@@ -1718,7 +1838,7 @@ function loadCarouselSlide(idx, post) {
         // Play as soon as it's the current slide, independent of the
         // auto-advance preference (see the cached-media branch above).
         if (idx === currentCarouselIndex) {
-          video.play().catch(() => { });
+          attemptPlay(video);
         }
 
         preloadCarouselVideo(post, idx + 1);
@@ -1822,7 +1942,7 @@ function goToCarouselSlide(idx, post) {
   if (newSlide) {
     const video = newSlide.querySelector('video');
     if (video) {
-      video.play().catch(() => { });
+      attemptPlay(video);
     }
   }
 }
@@ -1845,6 +1965,8 @@ function renderVideoModal(post, container) {
 
   const applyVideoToContainer = (videoUrl) => {
     currentModalVideoUrl = videoUrl;
+    // Successful load -> the post is available again; clear any stale flag.
+    setPostUnavailableState(post, false);
     cacheModalMedia(cacheKey, { isVideo: true, url: videoUrl, extension: 'mp4' });
 
     const video = createVideoElement(videoUrl);
@@ -1865,7 +1987,7 @@ function renderVideoModal(post, container) {
     attachVideoAutoplay(video);
 
     video.addEventListener('loadeddata', () => {
-      video.play().catch(() => { });
+      attemptPlay(video);
     });
 
     preloadUpcomingModalMedia();
@@ -1888,6 +2010,11 @@ function renderVideoModal(post, container) {
 
     if (response && response.success && response.videoUrl) {
       applyVideoToContainer(response.videoUrl);
+    } else if (response && response.unavailable) {
+      // Instagram confirmed the post is gone: flag it (grays out in the grid)
+      // and offer a one-click removal.
+      setPostUnavailableState(post, true);
+      renderUnavailableState(container, post);
     } else {
       container.innerHTML = `<p class="error-message">${t('failedToLoadVideoWithReason', { error: response?.error || t('unknownError') })}</p>`;
     }
@@ -2041,6 +2168,7 @@ function restoreSyncingState() {
   if (completeSection) completeSection.style.display = 'none';
   if (headerBtn) headerBtn.classList.add('syncing');
   if (resumeInfo) resumeInfo.style.display = 'none';
+  setTotalTileEstimated(true);
 }
 
 function closeSyncPanel() {
@@ -2218,6 +2346,7 @@ function importData(file) {
 function startSync() {
   isSyncing = true;
   setSyncGridBanner(true);
+  setTotalTileEstimated(true);
   const startBtn = document.getElementById('sync-start-btn');
   const stopBtn = document.getElementById('sync-stop-btn');
   const progressSection = document.getElementById('sync-progress-section');
@@ -2255,6 +2384,16 @@ function stopSync() {
 function handleSyncStarted() {
   document.getElementById('sync-progress-bar').style.width = '10%';
   updateLocalizedSyncStatus('syncing', 'preparing');
+}
+
+// While syncing, the TOTAL tile shows Instagram's reported count, which is only
+// an estimate (it counts deleted/private saved posts that never come down the
+// feed). Label it as such during sync; on completion we swap in the real count.
+function setTotalTileEstimated(estimated) {
+  const label = document.getElementById('sync-total-label');
+  const tile = document.getElementById('sync-total-tile');
+  if (label) label.textContent = estimated ? t('estimatedTotal') : t('total');
+  if (tile) tile.title = estimated ? t('estimatedTotalTooltip') : '';
 }
 
 function updateSyncPanelProgress(synced, failed, total = 0) {
@@ -2308,9 +2447,20 @@ function handleSyncComplete(syncedCount, failedCount) {
   const headerBtn = document.getElementById('sync-btn');
   const progressBar = document.getElementById('sync-progress-bar');
 
+  // Update the tiles first, then force the bar to 100%. updateSyncPanelProgress
+  // recomputes the bar width from synced/total (capped at 99%), so setting the
+  // width must come AFTER it -- otherwise the "complete" bar snaps back to a
+  // partial fill whenever Instagram's reported total exceeds what we could sync
+  // (deleted/unavailable saved posts inflate that total).
+  updateSyncPanelProgress(syncedCount, failedCount, lastKnownSyncTotal);
+
   if (progressBar) progressBar.style.width = '100%';
 
-  updateSyncPanelProgress(syncedCount, failedCount, lastKnownSyncTotal);
+  // Sync finished: the estimate is no longer relevant -- show the real number of
+  // posts we actually have and drop the "Estimated" qualifier.
+  const totalEl = document.getElementById('sync-total-count');
+  if (totalEl) totalEl.textContent = syncedCount;
+  setTotalTileEstimated(false);
 
   if (startBtn) {
     startBtn.disabled = false;

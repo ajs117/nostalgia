@@ -743,6 +743,27 @@ select:hover {
   transform: scale(1.05);
 }
 
+/* Posts Instagram has deleted: dimmed with a badge, still openable to remove. */
+.post-card.unavailable .post-media img,
+.post-card.unavailable .post-media video {
+  filter: grayscale(1) brightness(0.55);
+}
+
+.post-unavailable-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 3;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 59, 92, 0.92);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 .post-overlay {
   position: absolute;
   inset: 0;
@@ -1239,18 +1260,36 @@ select:hover {
   border-top: 1px solid var(--border);
 }
 
+/*
+ * Modal action buttons follow one hierarchy instead of a different colour per
+ * button:
+ *   - toggles (autoplay / loop): neutral, tinting to the brand accent only when
+ *     active, so colour communicates state rather than decoration.
+ *   - secondary actions (bump / download / collection): a single shared neutral
+ *     surface.
+ *   - one primary CTA (View on Instagram): the brand gradient.
+ */
 .modal-action-btn {
   display: flex;
   align-items: center;
   justify-content: center;
+  gap: 8px;
   width: 100%;
   padding: 12px;
-  border: 1px solid transparent;
+  border: 1px solid var(--border);
   border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-primary);
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
   transition: var(--transition-fast);
+}
+
+.modal-action-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  background: var(--bg-hover);
+  border-color: var(--border-light);
 }
 
 .modal-action-btn:disabled {
@@ -1258,72 +1297,42 @@ select:hover {
   cursor: wait;
 }
 
-.modal-download-btn {
-  background: rgba(255, 255, 255, 0.08);
-  color: var(--text-primary);
-  border-color: var(--border);
+.modal-toggle-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
 }
 
-.modal-autoplay-btn {
-  background: rgba(0, 149, 246, 0.12);
+/* Toggle ON state -> brand accent tint. aria-pressed is set by the JS. */
+.modal-toggle-btn[aria-pressed="true"] {
+  background: rgba(0, 149, 246, 0.14);
   color: var(--accent-primary);
-  border-color: rgba(0, 149, 246, 0.28);
+  border-color: rgba(0, 149, 246, 0.32);
 }
 
-.modal-autoplay-btn:hover:not(:disabled) {
-  transform: translateY(-1px);
-  background: rgba(0, 149, 246, 0.18);
-}
-
-.modal-loop-btn {
-  background: rgba(131, 58, 180, 0.12);
-  color: var(--accent-purple);
-  border-color: rgba(131, 58, 180, 0.28);
-}
-
-.modal-loop-btn:hover:not(:disabled) {
-  transform: translateY(-1px);
-  background: rgba(131, 58, 180, 0.18);
-}
-
-.modal-download-btn:hover:not(:disabled) {
-  transform: translateY(-1px);
-  background: rgba(255, 255, 255, 0.14);
-}
-
-.modal-collection-btn {
-  background: rgba(232, 180, 35, 0.14);
-  color: var(--accent-yellow);
-  border-color: rgba(232, 180, 35, 0.3);
-}
-
-.modal-collection-btn:hover:not(:disabled) {
-  transform: translateY(-1px);
-  background: rgba(232, 180, 35, 0.2);
+.modal-toggle-btn[aria-pressed="true"]:hover:not(:disabled) {
+  background: rgba(0, 149, 246, 0.2);
 }
 
 #modal-link {
-  display:flex;align-items:center;justify-content:center;gap:8px;width:100%;padding:12px;color:white;text-decoration:none;border-radius:var(--radius-md);font-size:14px;font-weight:600;transition:var(--transition-fast);
-  /* Use the brand gradient for prominent CTA to match header and other actions */
-  background: var(--gradient-pink-purple);
-  box-shadow: var(--shadow-glow-subtle);
+  display: flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
   width: 100%;
   padding: 12px;
-  background: var(--accent-primary);
-  color: white;
+  color: #fff;
   text-decoration: none;
   border-radius: var(--radius-md);
   font-size: 14px;
   font-weight: 600;
   transition: var(--transition-fast);
+  background: var(--gradient-pink-purple);
+  box-shadow: var(--shadow-glow-subtle);
 }
 
 #modal-link:hover {
-  /* Use theme gradient on hover instead of the blue accent */
-  background: linear-gradient(135deg, rgba(131,58,180,0.95) 0%, rgba(193,53,132,0.95) 100%);
+  background: linear-gradient(135deg, rgba(131, 58, 180, 0.95) 0%, rgba(193, 53, 132, 0.95) 100%);
   transform: translateY(-1px);
 }
 
@@ -1451,6 +1460,50 @@ select:hover {
   color: var(--text-tertiary);
   padding: 40px;
   text-align: center;
+}
+
+/* Modal state when a post has been deleted on Instagram */
+.modal-unavailable {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 48px 24px;
+  text-align: center;
+}
+
+.modal-unavailable-icon {
+  font-size: 44px;
+  line-height: 1;
+}
+
+.modal-unavailable-text {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 15px;
+  max-width: 320px;
+}
+
+.modal-unavailable-remove {
+  padding: 10px 18px;
+  border: 1px solid rgba(255, 59, 92, 0.4);
+  border-radius: var(--radius-md);
+  background: rgba(255, 59, 92, 0.12);
+  color: var(--error);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: var(--transition-fast);
+}
+
+.modal-unavailable-remove:hover:not(:disabled) {
+  background: rgba(255, 59, 92, 0.2);
+}
+
+.modal-unavailable-remove:disabled {
+  opacity: 0.7;
+  cursor: wait;
 }
 
 /* Carousel Modal Styles */

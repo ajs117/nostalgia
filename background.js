@@ -406,6 +406,44 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
 
+  if (request.action === 'BUMP_POST_TO_TOP') {
+    const post = request.post;
+    if (!post || !post.id) {
+      sendResponse({ success: false, error: 'Post metadata is incomplete' });
+      return false;
+    }
+
+    ensureInstagramTabForAction().then((tabId) => {
+      chrome.tabs.sendMessage(tabId, { action: 'BUMP_POST_TO_TOP', post }, async (response) => {
+        if (chrome.runtime.lastError) {
+          sendResponse({ success: false, error: chrome.runtime.lastError.message });
+          return;
+        }
+        if (!response || !response.success) {
+          sendResponse(response || { success: false, error: 'No response from Instagram tab' });
+          return;
+        }
+
+        // Mirror the bump locally: put it just above the current max savedOrder
+        // so nostalgia's "Newest Saved" also shows it on top.
+        try {
+          const bounds = await getDbBounds();
+          const newOrder = (typeof bounds.max === 'number' ? bounds.max : 0) + 1;
+          await updatePostsSavedOrder([{ id: post.id, link: post.link, savedOrder: newOrder }]);
+          updateExtensionTab();
+          sendResponse({ success: true, savedOrder: newOrder });
+        } catch (error) {
+          // The Instagram bump succeeded; only the local reorder failed.
+          sendResponse({ success: true, localReorderFailed: true });
+        }
+      });
+    }).catch((error) => {
+      sendResponse({ success: false, error: error.message });
+    });
+
+    return true;
+  }
+
   if (request.action === 'GET_POSTS_COUNT') {
     // O(1) count retrieval from metadata
     getPostsCount().then((count) => {
@@ -944,7 +982,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                                     }, 500);
                                   }
                                 } else {
-                                  safeSendResponse({ success: false, error: extracted?.error || 'Video not found' });
+                                  safeSendResponse({ success: false, unavailable: !!extracted?.unavailable, error: extracted?.error || 'Video not found' });
                                   if (shouldCloseTab) {
                                     setTimeout(() => {
                                       checkTabExists(tabId, (tab, error) => {
@@ -1203,6 +1241,27 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       sendResponse({ success: true });
     }).catch((error) => {
       console.error('Error clearing posts:', error);
+      sendResponse({ success: false, error: error.message });
+    });
+    return true;
+  }
+
+  if (request.action === 'DELETE_SINGLE_POST') {
+    deleteSinglePost(request.postId).then(() => {
+      updateExtensionTab();
+      sendResponse({ success: true });
+    }).catch((error) => {
+      console.error('Error deleting post:', error);
+      sendResponse({ success: false, error: error.message });
+    });
+    return true;
+  }
+
+  if (request.action === 'SET_POST_UNAVAILABLE') {
+    setPostUnavailable(request.postId, request.unavailable !== false).then(() => {
+      sendResponse({ success: true });
+    }).catch((error) => {
+      console.error('Error flagging post:', error);
       sendResponse({ success: false, error: error.message });
     });
     return true;
@@ -2567,6 +2626,76 @@ async function importAllData(data) {
   }
 }
 
+// Remove a single post (and its stored thumbnail) from the DB and keep the
+// cached posts_count in step. Used by the "Remove from library" action for
+// posts that Instagram has deleted.
+async function deleteSinglePost(postId) {
+  if (!postId) throw new Error('Missing postId');
+  let db;
+  try {
+    db = await openDB();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction([STORE_POSTS, STORE_MEDIA, STORE_METADATA], 'readwrite');
+      const postsStore = tx.objectStore(STORE_POSTS);
+
+      const getReq = postsStore.get(postId);
+      getReq.onsuccess = () => {
+        const post = getReq.result;
+        if (post) {
+          postsStore.delete(postId);
+          const thumbKey = post.thumbnailKey || `thumb_${postId}`;
+          tx.objectStore(STORE_MEDIA).delete(thumbKey);
+
+          const metaStore = tx.objectStore(STORE_METADATA);
+          const countReq = metaStore.get('posts_count');
+          countReq.onsuccess = () => {
+            const current = countReq.result;
+            if (typeof current === 'number' && current > 0) {
+              metaStore.put(current - 1, 'posts_count');
+            }
+          };
+        }
+      };
+
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    scheduleHashtagCacheRebuild();
+  } finally {
+    if (db) db.close();
+  }
+}
+
+// Set/clear an `unavailable` flag on a post so the grid can dim it. Reversible:
+// a later successful load clears it.
+async function setPostUnavailable(postId, unavailable) {
+  if (!postId) throw new Error('Missing postId');
+  let db;
+  try {
+    db = await openDB();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction([STORE_POSTS], 'readwrite');
+      const store = tx.objectStore(STORE_POSTS);
+      const getReq = store.get(postId);
+      getReq.onsuccess = () => {
+        const post = getReq.result;
+        if (post && !!post.unavailable !== unavailable) {
+          if (unavailable) {
+            post.unavailable = true;
+          } else {
+            delete post.unavailable;
+          }
+          store.put(post);
+        }
+      };
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } finally {
+    if (db) db.close();
+  }
+}
+
 // Extract video from carousel at specific index
 function extractCarouselVideo(carouselIndex) {
   try {
@@ -2754,6 +2883,29 @@ function extractFullResImage() {
 
 // Extract video URL from Instagram page
 function extractFromRenderedPage() {
+  // Strict "deleted post" detection: true ONLY when Instagram is showing its
+  // explicit "content isn't available" page (no real media + an unavailable
+  // marker), so a slow/rate-limited load is never mistaken for a deletion.
+  // Inlined because executeScript only serializes this single function's body.
+  const isUnavailablePage = () => {
+    try {
+      if (document.querySelector('article video, article img[src*="cdninstagram"], article img[src*="fbcdn"], main video')) {
+        return false;
+      }
+      const body = (document.body && document.body.innerText || '').toLowerCase();
+      const markers = [
+        "isn't available", 'isnt available', 'page not found', 'sorry, this page',
+        'no está disponible', 'esta página no', // es
+        '该页面无法', '无法使用', // zh
+        'उपलब्ध नहीं', // hi
+        'هذه الصفحة غير متوفرة', 'غير متاح' // ar
+      ];
+      return markers.some((m) => body.includes(m));
+    } catch (e) {
+      return false;
+    }
+  };
+
   try {
     const videoSelectors = [
       'video[src]',
@@ -2922,6 +3074,8 @@ function extractFromRenderedPage() {
 
     if (videoUrl) {
       return { videoUrl, imageUrl, username, caption };
+    } else if (isUnavailablePage()) {
+      return { unavailable: true, error: 'This post is no longer available on Instagram' };
     } else {
       return { error: 'Video URL not found on page' };
     }
