@@ -430,13 +430,25 @@ function initializePreferences() {
 
 // When enabled in Settings, kick off a sync shortly after the viewer opens so
 // newly saved posts show up without the user pressing Sync. Skipped if a sync is
-// already running.
+// already running. PINGs the service worker first (with retries) so a cold
+// worker/DB at browser startup can't make the sync misread the library state.
 function maybeAutoStartSync() {
   if (!currentAutoSyncEnabled || isSyncing) return;
-  setTimeout(() => {
-    if (!currentAutoSyncEnabled || isSyncing) return;
-    startSync();
-  }, 1500);
+
+  const attemptStart = (retriesLeft) => {
+    chrome.runtime.sendMessage({ action: 'PING' }, (response) => {
+      if (chrome.runtime.lastError || !response) {
+        if (retriesLeft > 0) {
+          setTimeout(() => attemptStart(retriesLeft - 1), 1000);
+        }
+        return;
+      }
+      if (!currentAutoSyncEnabled || isSyncing) return;
+      startSync();
+    });
+  };
+
+  setTimeout(() => attemptStart(5), 1500);
 }
 
 function openSettingsModal() {

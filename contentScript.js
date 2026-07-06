@@ -1122,6 +1122,50 @@ async function checkLoggedIn() {
   }
 }
 
+// Read the library's postsCount + savedOrder bounds from the background DB with
+// retries. Returns null only when the state genuinely can't be determined --
+// callers must then abort the sync rather than treat the library as empty.
+async function readLibraryStateReliably(maxAttempts = 4) {
+  const ask = (message) => new Promise((resolve) => {
+    try {
+      chrome.runtime.sendMessage(message, (response) => {
+        if (chrome.runtime.lastError || !response || response.error) {
+          resolve(null);
+        } else {
+          resolve(response);
+        }
+      });
+    } catch (e) {
+      resolve(null);
+    }
+  });
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const [countRes, boundsRes] = await Promise.all([
+      ask({ action: 'GET_POSTS_COUNT' }),
+      ask({ action: 'GET_DB_BOUNDS' })
+    ]);
+
+    const postsCount = (countRes && typeof countRes.count === 'number') ? countRes.count : null;
+    const dbBounds = boundsRes || null;
+
+    // Cross-check: a zero count alongside real savedOrder bounds means the
+    // cached count is stale/corrupt, not that the library is empty.
+    const inconsistent = postsCount === 0 &&
+      dbBounds && dbBounds.max !== null && dbBounds.max !== undefined;
+
+    if (postsCount !== null && dbBounds && !inconsistent) {
+      return { postsCount, dbBounds };
+    }
+
+    if (attempt < maxAttempts) {
+      await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+    }
+  }
+
+  return null;
+}
+
 async function getInstagramSavedPosts() {
   try {
     isSyncing = true;
@@ -1144,21 +1188,19 @@ async function getInstagramSavedPosts() {
     // Snapshot the DB extents and size. savedOrder anchors are derived from the
     // DB itself every run (no drifting counters): new saves go ABOVE max,
     // historical backfill goes BELOW min.
-    const dbBounds = await new Promise((resolve) => {
-      chrome.runtime.sendMessage({ action: 'GET_DB_BOUNDS' }, (response) => {
-        resolve(response || { min: null, max: null });
-      });
-    });
+    //
+    // CRITICAL: if this state can't be read (cold service worker at browser
+    // startup, DB error), the sync must ABORT -- not assume the DB is empty.
+    // Assuming empty made an auto-sync at startup "forget" the whole downloaded
+    // library and start again from scratch.
+    const libraryState = await readLibraryStateReliably();
+    if (!libraryState) {
+      isSyncing = false;
+      throw new Error('Could not read the local library state (extension database not ready). Sync aborted; please try again in a moment.');
+    }
 
-    const postsCount = await new Promise((resolve) => {
-      chrome.runtime.sendMessage({ action: 'GET_POSTS_COUNT' }, (response) => {
-        if (chrome.runtime.lastError) {
-          resolve(0);
-        } else {
-          resolve((response && response.count) || 0);
-        }
-      });
-    });
+    const dbBounds = libraryState.dbBounds;
+    const postsCount = libraryState.postsCount;
 
     const dbEmpty = postsCount === 0;
     let topMax = (dbBounds && dbBounds.max !== null && dbBounds.max !== undefined) ? dbBounds.max : 0;

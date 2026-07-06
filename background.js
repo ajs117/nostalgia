@@ -551,7 +551,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       sendResponse({ count });
     }).catch((error) => {
       console.error('Error getting posts count:', error);
-      sendResponse({ count: 0 });
+      // count:null (not 0) -- "couldn't read" must be distinguishable from
+      // "genuinely empty" or the sync wrongly restarts from scratch.
+      sendResponse({ count: null, error: error.message || 'count unavailable' });
     });
     return true;
   }
@@ -1434,7 +1436,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       sendResponse(bounds);
     }).catch((error) => {
       console.error('Error getting DB bounds:', error);
-      sendResponse({ min: null, max: null });
+      // Signal the failure explicitly: {min:null,max:null} is also what a
+      // genuinely empty DB returns, and the sync must tell those apart or it
+      // re-downloads the whole library from scratch.
+      sendResponse({ min: null, max: null, error: error.message || 'bounds unavailable' });
     });
     return true;
   }
@@ -1650,7 +1655,7 @@ async function getPostsCount() {
   let db;
   try {
     db = await openDB();
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       const transaction = db.transaction([STORE_METADATA], 'readonly');
       const store = transaction.objectStore(STORE_METADATA);
       const request = store.get('posts_count');
@@ -1661,13 +1666,15 @@ async function getPostsCount() {
       };
       request.onerror = () => {
         db.close();
-        // Fallback: count posts directly
-        countPostsDirectly().then(resolve).catch(() => resolve(0));
+        // Fallback: count posts directly. If even that fails, propagate the
+        // error -- returning 0 here made "DB unreadable" indistinguishable from
+        // "DB empty", which tricked the sync into a full re-download.
+        countPostsDirectly().then(resolve).catch(reject);
       };
     });
   } catch (error) {
     if (db) db.close();
-    return 0;
+    throw error;
   }
 }
 
