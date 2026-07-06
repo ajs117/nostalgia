@@ -257,6 +257,37 @@ function ensureInstagramTabForAction() {
   });
 }
 
+// Try to resolve a video URL through Instagram's authenticated media-info API in
+// the persistent content-script tab, instead of spawning a throwaway per-video
+// tab. Resolves to { success, videoUrl } on success or null on any failure, so
+// callers can cleanly fall back to the legacy tab-scrape. Never rejects.
+function fetchVideoViaContentApi(mediaId, carouselIndex = null) {
+  return new Promise((resolve) => {
+    if (!mediaId) {
+      resolve(null);
+      return;
+    }
+
+    ensureInstagramTabForAction().then((tabId) => {
+      chrome.tabs.sendMessage(
+        tabId,
+        { action: 'FETCH_MEDIA_VIDEO', mediaId, carouselIndex },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            resolve(null);
+            return;
+          }
+          if (response && response.success && response.videoUrl) {
+            resolve(response);
+          } else {
+            resolve(null);
+          }
+        }
+      );
+    }).catch(() => resolve(null));
+  });
+}
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   // Handle messages - each must explicitly return true (async) or false (sync)
 
@@ -898,7 +929,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         });
       }
 
-      createNewTab();
+      // Prefer the tab-free API path; only fall back to spawning a scrape tab
+      // (createNewTab) if it can't resolve the URL. This is what stops tabs from
+      // flashing in and out during autoplay/preload.
+      fetchVideoViaContentApi(request.postId, null).then((apiResult) => {
+        if (apiResult && apiResult.videoUrl) {
+          safeSendResponse({ success: true, videoUrl: apiResult.videoUrl });
+        } else {
+          createNewTab();
+        }
+      });
 
       function processTab(tabId, _isNewTab) {
         try {
@@ -1082,65 +1122,82 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         }
       };
 
-      // Create background tab to extract video
-      chrome.tabs.create({
-        url: permalink,
-        active: false,
-        pinned: false
-      }, (tab) => {
-        if (chrome.runtime.lastError) {
-          safeSendResponse({ success: false, error: `Failed to create tab: ${chrome.runtime.lastError.message}` });
+      // Try the tab-free API path first (no flashing tabs); fall back to the
+      // scrape tab below only if it can't resolve the URL.
+      fetchVideoViaContentApi(request.postId, carouselIndex).then((apiResult) => {
+        if (apiResult && apiResult.videoUrl) {
+          safeSendResponse({ success: true, videoUrl: apiResult.videoUrl });
           return;
         }
-
-        const tabId = tab.id;
-        let attempts = 0;
-        const maxAttempts = 20;
-
-        const checkTab = setInterval(() => {
-          attempts++;
-
-          chrome.tabs.get(tabId, (tabInfo) => {
-            if (chrome.runtime.lastError) {
-              clearInterval(checkTab);
-              safeSendResponse({ success: false, error: 'Tab error' });
-              return;
-            }
-
-            if (tabInfo.status === 'complete' && attempts >= 5) {
-              clearInterval(checkTab);
-
-              setTimeout(() => {
-                chrome.scripting.executeScript({
-                  target: { tabId: tabId, allFrames: false },
-                  func: extractCarouselVideo,
-                  args: [carouselIndex]
-                }, (results) => {
-                  chrome.tabs.remove(tabId, () => { });
-
-                  if (chrome.runtime.lastError || !results || !results[0]) {
-                    safeSendResponse({ success: false, error: 'Script error' });
-                    return;
-                  }
-
-                  const extracted = results[0].result;
-                  if (extracted && extracted.videoUrl) {
-                    safeSendResponse({ success: true, videoUrl: extracted.videoUrl });
-                  } else {
-                    safeSendResponse({ success: false, error: 'Video not found in carousel' });
-                  }
-                });
-              }, 3000);
-            }
-
-            if (attempts >= maxAttempts) {
-              clearInterval(checkTab);
-              chrome.tabs.remove(tabId, () => { });
-              safeSendResponse({ success: false, error: 'Timeout' });
-            }
-          });
-        }, 500);
+        startCarouselScrapeTab();
       });
+
+      function startCarouselScrapeTab() {
+      // Create background tab to extract video
+        chrome.tabs.create({
+          url: permalink,
+          active: false,
+          pinned: false
+        }, (tab) => {
+          if (chrome.runtime.lastError) {
+            safeSendResponse({ success: false, error: `Failed to create tab: ${chrome.runtime.lastError.message}` });
+            return;
+          }
+
+          const tabId = tab.id;
+          let attempts = 0;
+          const maxAttempts = 20;
+
+          // Mute so the reel's audio doesn't leak while we scrape the URL.
+          chrome.tabs.update(tabId, { muted: true }, () => {
+            if (chrome.runtime.lastError) { /* tab may already be gone */ }
+          });
+
+          const checkTab = setInterval(() => {
+            attempts++;
+
+            chrome.tabs.get(tabId, (tabInfo) => {
+              if (chrome.runtime.lastError) {
+                clearInterval(checkTab);
+                safeSendResponse({ success: false, error: 'Tab error' });
+                return;
+              }
+
+              if (tabInfo.status === 'complete' && attempts >= 5) {
+                clearInterval(checkTab);
+
+                setTimeout(() => {
+                  chrome.scripting.executeScript({
+                    target: { tabId: tabId, allFrames: false },
+                    func: extractCarouselVideo,
+                    args: [carouselIndex]
+                  }, (results) => {
+                    chrome.tabs.remove(tabId, () => { });
+
+                    if (chrome.runtime.lastError || !results || !results[0]) {
+                      safeSendResponse({ success: false, error: 'Script error' });
+                      return;
+                    }
+
+                    const extracted = results[0].result;
+                    if (extracted && extracted.videoUrl) {
+                      safeSendResponse({ success: true, videoUrl: extracted.videoUrl });
+                    } else {
+                      safeSendResponse({ success: false, error: 'Video not found in carousel' });
+                    }
+                  });
+                }, 3000);
+              }
+
+              if (attempts >= maxAttempts) {
+                clearInterval(checkTab);
+                chrome.tabs.remove(tabId, () => { });
+                safeSendResponse({ success: false, error: 'Timeout' });
+              }
+            });
+          }, 500);
+        });
+      } // end startCarouselScrapeTab
     } catch (error) {
       sendResponse({ success: false, error: error.message });
     }

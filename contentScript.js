@@ -1728,8 +1728,63 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
 
+  if (request.action === 'FETCH_MEDIA_VIDEO') {
+    fetchMediaVideoUrl(request.mediaId, request.carouselIndex)
+      .then((response) => sendResponse(response))
+      .catch((error) => {
+        sendResponse({ success: false, error: error.message });
+      });
+    return true;
+  }
+
   return false;
 });
+
+// Resolve a post's video URL straight from Instagram's private media-info API,
+// reusing this already-authenticated tab. This replaces the old approach of
+// spawning (and immediately closing) a throwaway Instagram tab per video, which
+// made tabs visibly flash in and out during autoplay/preload.
+async function fetchMediaVideoUrl(mediaId, carouselIndex = null) {
+  if (!mediaId) {
+    return { success: false, error: 'No media id provided' };
+  }
+
+  const pickVideoUrl = (node) => {
+    const versions = node?.video_versions;
+    if (!Array.isArray(versions) || versions.length === 0) return null;
+    const withUrl = versions.find(
+      (v) => v && typeof v.url === 'string' && v.url.startsWith('http')
+    );
+    return withUrl?.url || null;
+  };
+
+  const data = await instagramApiRequest(
+    `https://i.instagram.com/api/v1/media/${mediaId}/info/`,
+    { method: 'GET' }
+  );
+  const media = data?.items?.[0];
+  if (!media) {
+    return { success: false, error: 'Media info not available' };
+  }
+
+  let url = null;
+  if (carouselIndex !== null && carouselIndex !== undefined && Array.isArray(media.carousel_media)) {
+    url = pickVideoUrl(media.carousel_media[carouselIndex]);
+  } else {
+    url = pickVideoUrl(media);
+    if (!url && Array.isArray(media.carousel_media)) {
+      for (const child of media.carousel_media) {
+        url = pickVideoUrl(child);
+        if (url) break;
+      }
+    }
+  }
+
+  if (url) {
+    return { success: true, videoUrl: url };
+  }
+  return { success: false, error: 'No video found for this media' };
+}
 
 // Unsave then immediately re-save a post so Instagram re-sorts it to the top of
 // the saved feed (that's how the feed orders: most recently saved first). This

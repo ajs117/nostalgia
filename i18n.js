@@ -681,6 +681,9 @@
     }
 
     const normalized = language.replace('-', '_').toLowerCase();
+    // tlh (Klingon) is an explicit opt-in easter egg -- match it before the
+    // prefix rules so selecting it doesn't silently fall through to English.
+    if (normalized === 'tlh' || normalized.startsWith('tlh')) return 'tlh';
     if (normalized.startsWith('es')) return 'es';
     if (normalized.startsWith('zh')) return 'zh_CN';
     if (normalized.startsWith('hi')) return 'hi';
