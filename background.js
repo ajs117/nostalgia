@@ -3,6 +3,13 @@ let capturedImages = [];
 let capturedImagesCleanupTimeout = null;
 let extensionTabId = null;
 let activeInstagramTabId = null;
+// True while a saved-posts sync is running. Video-URL lookups must NOT touch the
+// sync tab or fire concurrent Instagram API calls during this window, or the
+// sync's paginated request sequence gets corrupted (it "loses track" of state).
+let syncInProgress = false;
+// A dedicated tab for tab-free video-URL lookups, kept entirely separate from
+// activeInstagramTabId (the sync tab) so the two never interfere.
+let videoApiTabId = null;
 
 // Mutex for preventing race conditions in batch saves
 let batchSaveLock = Promise.resolve();
@@ -19,6 +26,12 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   }
   if (tabId === activeInstagramTabId) {
     activeInstagramTabId = null;
+    // The sync runs in this tab; if it's gone, the sync is no longer running.
+    // Clear the flag so a future sync isn't permanently blocked.
+    syncInProgress = false;
+  }
+  if (tabId === videoApiTabId) {
+    videoApiTabId = null;
   }
 });
 
@@ -257,18 +270,63 @@ function ensureInstagramTabForAction() {
   });
 }
 
+// Resolve/reuse a dedicated hidden Instagram tab for tab-free video-URL lookups.
+// This is deliberately kept SEPARATE from activeInstagramTabId (the sync tab):
+// it never adopts, creates over, or hands back the sync tab, so video lookups
+// can't disturb an in-flight sync. Never resolves the sync tab.
+function ensureVideoApiTab() {
+  return new Promise((resolve, reject) => {
+    if (videoApiTabId !== null) {
+      chrome.tabs.get(videoApiTabId, (tab) => {
+        if (!chrome.runtime.lastError && tab) {
+          resolve(videoApiTabId);
+          return;
+        }
+        videoApiTabId = null;
+        pickOrCreateVideoApiTab(resolve, reject);
+      });
+      return;
+    }
+    pickOrCreateVideoApiTab(resolve, reject);
+  });
+}
+
+function pickOrCreateVideoApiTab(resolve, reject) {
+  chrome.tabs.query({ url: 'https://www.instagram.com/*' }, (tabs) => {
+    // Reuse any existing Instagram tab EXCEPT the sync tab.
+    const usable = (tabs || []).find((t) => t.id !== activeInstagramTabId);
+    if (usable) {
+      videoApiTabId = usable.id;
+      resolve(videoApiTabId);
+      return;
+    }
+    chrome.tabs.create({ url: 'https://www.instagram.com/', active: false }, (newTab) => {
+      if (chrome.runtime.lastError || !newTab) {
+        reject(new Error(chrome.runtime.lastError?.message || 'Failed to open Instagram tab'));
+        return;
+      }
+      videoApiTabId = newTab.id;
+      waitForTabToComplete(newTab.id).then(resolve).catch(reject);
+    });
+  });
+}
+
 // Try to resolve a video URL through Instagram's authenticated media-info API in
-// the persistent content-script tab, instead of spawning a throwaway per-video
-// tab. Resolves to { success, videoUrl } on success or null on any failure, so
-// callers can cleanly fall back to the legacy tab-scrape. Never rejects.
+// a dedicated content-script tab, instead of spawning a throwaway per-video tab.
+// Resolves to { success, videoUrl } on success or null on any failure, so callers
+// can cleanly fall back to the legacy tab-scrape. Never rejects.
+//
+// While a sync is running we deliberately bail (resolve null -> tab-scrape
+// fallback): firing media-info API calls in parallel with the sync's paginated
+// requests corrupts the sync's state ("it doesn't know what state it's in").
 function fetchVideoViaContentApi(mediaId, carouselIndex = null) {
   return new Promise((resolve) => {
-    if (!mediaId) {
+    if (!mediaId || syncInProgress) {
       resolve(null);
       return;
     }
 
-    ensureInstagramTabForAction().then((tabId) => {
+    ensureVideoApiTab().then((tabId) => {
       chrome.tabs.sendMessage(
         tabId,
         { action: 'FETCH_MEDIA_VIDEO', mediaId, carouselIndex },
@@ -533,6 +591,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'SYNC_WITH_INSTAGRAM') {
+    syncInProgress = true;
     chrome.tabs.create({ url: 'https://www.instagram.com/' }, (tab) => {
       activeInstagramTabId = tab.id;
       chrome.tabs.onUpdated.addListener(function listener(tabId, info) {
@@ -546,7 +605,17 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'SYNC_WITH_INSTAGRAM_BACKGROUND') {
+    // Guard against a second concurrent sync (e.g. auto-sync firing while a
+    // previous background sync is still running). Two syncs writing the same DB
+    // and reporting conflicting counts is what makes progress oscillate and the
+    // state go haywire. Just re-announce the running sync instead.
+    if (syncInProgress && activeInstagramTabId !== null) {
+      safeBroadcast({ action: 'SYNC_STARTED' });
+      return false;
+    }
+
     // Open Instagram in a background tab for sync (cookies required)
+    syncInProgress = true;
     chrome.tabs.create({ url: 'https://www.instagram.com/', active: false }, (tab) => {
       activeInstagramTabId = tab.id;
 
@@ -696,6 +765,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'SYNC_FINISHED') {
+    syncInProgress = false;
     cancelPendingSyncProgressBroadcast();
     const completeMsg = {
       action: 'SYNC_COMPLETE',
@@ -731,6 +801,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'IMPORT_FAILED') {
+    syncInProgress = false;
     safeBroadcast({ action: 'IMPORT_FAILED', error: request.error });
     if (activeInstagramTabId) {
       safeSendToTab(activeInstagramTabId, { action: 'IMPORT_FAILED', error: request.error });
@@ -739,6 +810,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'SYNC_LOGIN_REQUIRED') {
+    syncInProgress = false;
     safeBroadcast({ action: 'SYNC_LOGIN_REQUIRED', error: request.error });
 
     if (activeInstagramTabId) {
@@ -760,6 +832,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'SYNC_STOPPED') {
+    syncInProgress = false;
     cancelPendingSyncProgressBroadcast();
     const stoppedMsg = {
       action: 'SYNC_STOPPED',

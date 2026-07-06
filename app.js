@@ -2715,7 +2715,11 @@ function updateSyncPanelProgress(synced, failed, total = 0) {
     }
   }
 
-  if (progressBar) {
+  // Only the live sync drives the progress bar. Restored/stored progress (shown
+  // by checkSyncProgress when NOT syncing) must not move the bar, otherwise it
+  // paints the last run's percentage and then visibly snaps back to ~5% the
+  // moment an auto-sync starts -- the "3% -> 81% -> back again" bounce.
+  if (progressBar && isSyncing) {
     if (total > 0) {
       // Real progress based on total
       const percent = Math.min(99, Math.round((processed / total) * 100));
