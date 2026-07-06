@@ -13,6 +13,18 @@ let currentModalIndex = -1;
 let currentCarouselIndex = 0; // Track which item in a carousel is being viewed
 let currentRandomSeed = null;
 let currentModalVideoUrl = null;
+// Bumped every time the modal opens/closes. Async media callbacks capture the
+// value at request time and bail if it no longer matches, so a video that
+// resolves after the user has navigated away never gets appended or played
+// (this is what caused audio to keep playing in the background after close).
+let modalGeneration = 0;
+// Timer that advances image posts during autoplay (videos advance on 'ended').
+let autoplayImageTimer = null;
+const AUTOPLAY_IMAGE_DURATION_MS = 3000;
+// Hidden <video> that pre-buffers the next clip's bytes while the current one
+// plays, so advancing is instant. Only one is kept alive at a time.
+let preloadBufferVideo = null;
+let preloadBufferedUrl = null;
 const MODAL_MEDIA_CACHE_MAX_ENTRIES = 24;
 /** @type {Map<string, ModalCachedMedia>} */
 let modalMediaCache = new Map();
@@ -21,6 +33,9 @@ let totalPosts = 0;
 let isSyncing = false;
 let isRebuilding = false;
 let lastKnownSyncTotal = 0;
+// Once a sync completes the TOTAL tile shows the real synced count; this flag
+// stops any late/stray SYNC_PROGRESS message from reverting it to the estimate.
+let syncTotalFinalized = false;
 let currentTheme = 'dark';
 let currentLanguage = 'en';
 let currentAutoplayEnabled = true;
@@ -32,6 +47,8 @@ const THEME_STORAGE_KEY = 'nostalgia_theme';
 const LANGUAGE_STORAGE_KEY = 'nostalgia_language';
 const AUTOPLAY_STORAGE_KEY = 'nostalgia_autoplay';
 const LOOP_STORAGE_KEY = 'nostalgia_loop';
+const AUTOSYNC_STORAGE_KEY = 'nostalgia_autosync';
+let currentAutoSyncEnabled = false;
 
 function getI18nApi() {
   /** @type {NostalgiaI18nApi} */
@@ -149,15 +166,45 @@ function toggleModalAutoplay() {
   applyAutoplayPreference(!currentAutoplayEnabled);
 
   if (!currentAutoplayEnabled) {
+    clearAutoplayImageTimer();
     return;
   }
 
   const activeVideo = document.querySelector('#modal-media video');
   if (activeVideo) {
     activeVideo.play().catch(() => { });
+  } else {
+    // No video on screen means we're on an image -> (re)start the hold timer so
+    // autoplay resumes advancing.
+    const post = getCurrentModalPost();
+    if (post && post.isCarousel) {
+      scheduleAutoplayCarouselImageAdvance(post, currentCarouselIndex);
+    } else {
+      scheduleAutoplayImageAdvance();
+    }
   }
 
   preloadUpcomingModalMedia();
+}
+
+function hasNextModalPost() {
+  if (currentModalIndex < 0) return false;
+  if (currentModalIndex + 1 < displayedPosts.length) return true;
+  const totalPages = Math.max(1, Math.ceil(totalPosts / postsPerPage));
+  return currentPage < totalPages;
+}
+
+function updateModalSkipButton() {
+  const skipBtn = document.getElementById('modal-skip-btn');
+  if (!skipBtn) return;
+  skipBtn.disabled = !hasNextModalPost();
+}
+
+// Manual "skip" -> jump straight to the next post (rolling to the next page if
+// needed), cancelling any pending image-autoplay hold.
+function skipToNextModalPost() {
+  clearAutoplayImageTimer();
+  advanceModalToNext();
 }
 
 // Flip a post's `unavailable` state in memory, in the DB, and on its grid tile.
@@ -191,7 +238,8 @@ function setPostUnavailableState(post, unavailable) {
 // Shown in the modal media area when Instagram has deleted the post. Offers a
 // one-click removal from the local library (the only destructive path -- no
 // auto-delete).
-function renderUnavailableState(container, post) {
+function renderUnavailableState(container, post, options = {}) {
+  const { message = t('postUnavailable'), unavailable = true } = options;
   container.innerHTML = '';
 
   const wrap = document.createElement('div');
@@ -199,12 +247,12 @@ function renderUnavailableState(container, post) {
 
   const icon = document.createElement('div');
   icon.className = 'modal-unavailable-icon';
-  icon.textContent = '🚫';
+  icon.textContent = unavailable ? '🚫' : '⚠️';
   wrap.appendChild(icon);
 
   const msg = document.createElement('p');
   msg.className = 'modal-unavailable-text';
-  msg.textContent = t('postUnavailable');
+  msg.textContent = message;
   wrap.appendChild(msg);
 
   const removeBtn = document.createElement('button');
@@ -349,6 +397,7 @@ function initializePreferences() {
   currentTheme = localStorage.getItem(THEME_STORAGE_KEY) || 'dark';
   currentAutoplayEnabled = localStorage.getItem(AUTOPLAY_STORAGE_KEY) !== 'false';
   currentLoopEnabled = localStorage.getItem(LOOP_STORAGE_KEY) === 'true';
+  currentAutoSyncEnabled = localStorage.getItem(AUTOSYNC_STORAGE_KEY) === 'true';
 
   populateLanguageSelect();
   applyTheme(currentTheme);
@@ -358,6 +407,7 @@ function initializePreferences() {
 
   const languageSelect = document.getElementById('language-select');
   const themeSelect = document.getElementById('theme-select');
+  const autoSyncToggle = document.getElementById('auto-sync-toggle');
 
   if (languageSelect) {
     languageSelect.value = currentLanguage;
@@ -368,6 +418,25 @@ function initializePreferences() {
     themeSelect.value = currentTheme;
     themeSelect.addEventListener('change', (event) => applyTheme(event.target.value));
   }
+
+  if (autoSyncToggle) {
+    autoSyncToggle.checked = currentAutoSyncEnabled;
+    autoSyncToggle.addEventListener('change', (event) => {
+      currentAutoSyncEnabled = event.target.checked;
+      localStorage.setItem(AUTOSYNC_STORAGE_KEY, currentAutoSyncEnabled ? 'true' : 'false');
+    });
+  }
+}
+
+// When enabled in Settings, kick off a sync shortly after the viewer opens so
+// newly saved posts show up without the user pressing Sync. Skipped if a sync is
+// already running.
+function maybeAutoStartSync() {
+  if (!currentAutoSyncEnabled || isSyncing) return;
+  setTimeout(() => {
+    if (!currentAutoSyncEnabled || isSyncing) return;
+    startSync();
+  }, 1500);
 }
 
 function openSettingsModal() {
@@ -564,6 +633,7 @@ document.addEventListener('DOMContentLoaded', () => {
   setupMobileFilters();
   setupSyncPanel();
   setupSettingsModal();
+  maybeAutoStartSync();
 
   // Clear any stale sync status on fresh page load
   // The status will be updated if there's an active sync via messages
@@ -629,11 +699,13 @@ function initializeEventListeners() {
   const autoplayBtn = document.getElementById('modal-autoplay-btn');
   const loopBtn = document.getElementById('modal-loop-btn');
   const bumpBtn = document.getElementById('modal-bump-btn');
+  const skipBtn = document.getElementById('modal-skip-btn');
   if (downloadBtn) downloadBtn.addEventListener('click', downloadCurrentMedia);
   if (collectionBtn) collectionBtn.addEventListener('click', addCurrentPostToCollection);
   if (autoplayBtn) autoplayBtn.addEventListener('click', toggleModalAutoplay);
   if (loopBtn) loopBtn.addEventListener('click', toggleModalLoop);
   if (bumpBtn) bumpBtn.addEventListener('click', bumpCurrentPostToTop);
+  if (skipBtn) skipBtn.addEventListener('click', skipToNextModalPost);
 
   // Keyboard navigation
   document.addEventListener('keydown', (e) => {
@@ -681,7 +753,7 @@ function setupMobileFilters() {
 }
 
 // Load posts with pagination from background
-function loadPosts(append = false, fetchHashtagsAfter = false) {
+function loadPosts(append = false, fetchHashtagsAfter = false, onComplete = null) {
   const requestId = ++latestLoadRequestId;
   showLoadingState();
 
@@ -736,6 +808,10 @@ function loadPosts(append = false, fetchHashtagsAfter = false) {
       if (fetchHashtagsAfter) {
         fetchAllHashtags();
       }
+    }
+
+    if (typeof onComplete === 'function') {
+      onComplete();
     }
   });
 }
@@ -1158,6 +1234,56 @@ function renderPagination() {
     }
   });
   container.appendChild(nextBtn);
+
+  // Jump-to-page: type a page number and press Enter (or click Go).
+  const jump = document.createElement('div');
+  jump.className = 'pagination-jump';
+
+  const jumpLabel = document.createElement('span');
+  jumpLabel.className = 'pagination-jump-label';
+  jumpLabel.textContent = t('goToPage');
+  jump.appendChild(jumpLabel);
+
+  const jumpInput = document.createElement('input');
+  jumpInput.type = 'number';
+  jumpInput.className = 'pagination-jump-input';
+  jumpInput.min = '1';
+  jumpInput.max = String(totalPages);
+  jumpInput.value = String(currentPage);
+  jumpInput.setAttribute('aria-label', t('goToPage'));
+  jump.appendChild(jumpInput);
+
+  const jumpTotal = document.createElement('span');
+  jumpTotal.className = 'pagination-jump-total';
+  jumpTotal.textContent = t('ofPages', { total: totalPages });
+  jump.appendChild(jumpTotal);
+
+  const goToTypedPage = () => {
+    const target = parseInt(jumpInput.value, 10);
+    if (!Number.isFinite(target) || target < 1 || target > totalPages) {
+      jumpInput.value = String(currentPage);
+      return;
+    }
+    if (target === currentPage) return;
+    currentPage = target;
+    loadPosts();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  jumpInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      goToTypedPage();
+    }
+  });
+
+  const goBtn = document.createElement('button');
+  goBtn.className = 'pagination-jump-go';
+  goBtn.textContent = t('go');
+  goBtn.addEventListener('click', goToTypedPage);
+  jump.appendChild(goBtn);
+
+  container.appendChild(jump);
 }
 
 // Render posts
@@ -1494,11 +1620,51 @@ function bumpCurrentPostToTop() {
   });
 }
 
+// Warm the browser's media cache for the upcoming video so it starts instantly
+// when the user advances. A detached-but-attached hidden, muted
+// <video preload="auto"> is created off-screen and never played -- that alone
+// tells the browser to begin fetching/buffering the bytes, with no sound and no
+// visible playback. Only one clip is buffered at a time.
+function bufferUpcomingVideo(url) {
+  if (!url || url === preloadBufferedUrl) return;
+  disposePreloadBuffer();
+  preloadBufferedUrl = url;
+
+  const buffer = document.createElement('video');
+  buffer.muted = true;
+  buffer.preload = 'auto';
+  buffer.playsInline = true;
+  buffer.setAttribute('aria-hidden', 'true');
+  // Off-screen and inert: it buffers but never shows or plays.
+  buffer.style.cssText = 'position:absolute;left:-9999px;width:1px;height:1px;opacity:0;pointer-events:none;';
+  buffer.src = url;
+  document.body.appendChild(buffer);
+  try { buffer.load(); } catch (e) { /* ignore */ }
+  preloadBufferVideo = buffer;
+}
+
+function disposePreloadBuffer() {
+  if (preloadBufferVideo) {
+    try {
+      preloadBufferVideo.pause();
+      preloadBufferVideo.removeAttribute('src');
+      preloadBufferVideo.load();
+      preloadBufferVideo.remove();
+    } catch (e) { /* ignore */ }
+    preloadBufferVideo = null;
+  }
+  preloadBufferedUrl = null;
+}
+
 function preloadPrimaryVideo(post) {
   if (!post || !post.isVideo || !post.link) return;
 
   const cacheKey = getModalCacheKey(post);
-  if (modalMediaCache.has(cacheKey)) return;
+  const cached = modalMediaCache.get(cacheKey);
+  if (cached?.url) {
+    bufferUpcomingVideo(cached.url);
+    return;
+  }
 
   chrome.runtime.sendMessage({
     action: 'FETCH_VIDEO_CDN',
@@ -1507,6 +1673,7 @@ function preloadPrimaryVideo(post) {
   }, (response) => {
     if (response && response.success && response.videoUrl) {
       cacheModalMedia(cacheKey, { isVideo: true, url: response.videoUrl, extension: 'mp4' });
+      bufferUpcomingVideo(response.videoUrl);
     }
   });
 }
@@ -1518,7 +1685,11 @@ function preloadCarouselVideo(post, idx) {
   if (!item?.isVideo || !post.link) return;
 
   const cacheKey = getModalCacheKey(post, idx);
-  if (modalMediaCache.has(cacheKey)) return;
+  const cached = modalMediaCache.get(cacheKey);
+  if (cached?.url) {
+    bufferUpcomingVideo(cached.url);
+    return;
+  }
 
   chrome.runtime.sendMessage({
     action: 'FETCH_CAROUSEL_VIDEO',
@@ -1528,6 +1699,7 @@ function preloadCarouselVideo(post, idx) {
   }, (response) => {
     if (response && response.success && response.videoUrl) {
       cacheModalMedia(cacheKey, { isVideo: true, url: response.videoUrl, extension: 'mp4' });
+      bufferUpcomingVideo(response.videoUrl);
     }
   });
 }
@@ -1563,7 +1735,77 @@ function attachVideoAutoplay(video, onAdvance = null) {
     if (typeof onAdvance === 'function') {
       onAdvance();
     } else {
-      navigateModal(1);
+      advanceModalToNext();
+    }
+  });
+}
+
+function clearAutoplayImageTimer() {
+  if (autoplayImageTimer) {
+    clearTimeout(autoplayImageTimer);
+    autoplayImageTimer = null;
+  }
+}
+
+// Autoplay used to stall on image posts (they never fire 'ended'). Hold each
+// image for a few seconds, then advance -- but only while the modal is still on
+// this same post (generation guard) and autoplay is still on.
+function scheduleAutoplayImageAdvance() {
+  clearAutoplayImageTimer();
+  if (!currentAutoplayEnabled) return;
+  const gen = modalGeneration;
+  autoplayImageTimer = setTimeout(() => {
+    autoplayImageTimer = null;
+    if (gen !== modalGeneration || !currentAutoplayEnabled) return;
+    advanceModalToNext();
+  }, AUTOPLAY_IMAGE_DURATION_MS);
+}
+
+// Same idea for an image slide inside a carousel: advance to the next slide, or
+// on to the next post once the carousel's last slide has been shown.
+function scheduleAutoplayCarouselImageAdvance(post, idx) {
+  clearAutoplayImageTimer();
+  if (!currentAutoplayEnabled) return;
+  const item = post.carouselMedia?.[idx];
+  if (!item || item.isVideo) return; // videos advance on their 'ended' event
+  const gen = modalGeneration;
+  autoplayImageTimer = setTimeout(() => {
+    autoplayImageTimer = null;
+    if (gen !== modalGeneration || !currentAutoplayEnabled) return;
+    if (currentCarouselIndex !== idx) return;
+    const nextIdx = idx + 1;
+    if (nextIdx < post.carouselMedia.length) {
+      goToCarouselSlide(nextIdx, post);
+    } else {
+      advanceModalToNext();
+    }
+  }, AUTOPLAY_IMAGE_DURATION_MS);
+}
+
+// Advance the modal to the next post. Rolls onto the next page automatically
+// when the current page is exhausted, so autoplay/skip keep going instead of
+// stopping at the end of a page.
+function advanceModalToNext() {
+  if (currentModalIndex < 0) return;
+  clearAutoplayImageTimer();
+
+  const nextIndex = currentModalIndex + 1;
+  if (nextIndex < displayedPosts.length) {
+    openModal(nextIndex);
+    return;
+  }
+
+  const totalPages = Math.max(1, Math.ceil(totalPosts / postsPerPage));
+  if (currentPage >= totalPages) return; // genuinely the last post
+
+  const gen = modalGeneration;
+  currentPage++;
+  loadPosts(false, false, () => {
+    // Bail if the user closed or navigated the modal while the page loaded.
+    if (gen !== modalGeneration) return;
+    if (displayedPosts.length > 0) {
+      window.scrollTo({ top: 0 });
+      openModal(0);
     }
   });
 }
@@ -1571,6 +1813,11 @@ function attachVideoAutoplay(video, onAdvance = null) {
 // Open modal
 function openModal(index, carouselIdx = 0) {
   if (index < 0 || index >= displayedPosts.length) return;
+
+  // New media context: invalidate any in-flight fetch callbacks from the post we
+  // were just on, and cancel a pending image-autoplay advance.
+  modalGeneration++;
+  clearAutoplayImageTimer();
 
   const modal = document.getElementById('modal');
   const mediaContainer = document.getElementById('modal-media');
@@ -1661,6 +1908,14 @@ function openModal(index, carouselIdx = 0) {
   modal.classList.add('active');
   document.body.style.overflow = 'hidden';
 
+  updateModalSkipButton();
+
+  // Keep autoplay moving through standalone image posts (videos advance on
+  // their own 'ended' event; carousels are handled per-slide).
+  if (currentAutoplayEnabled && !post.isVideo && !isModalAutoplayCapable(post) && !post.isCarousel) {
+    scheduleAutoplayImageAdvance();
+  }
+
   preloadUpcomingModalMedia(index);
 }
 
@@ -1744,10 +1999,12 @@ function renderCarouselModal(post, container, startIndex = 0) {
 
   // Load the current slide content
   loadCarouselSlide(currentCarouselIndex, post);
+  scheduleAutoplayCarouselImageAdvance(post, currentCarouselIndex);
 }
 
 // Load content for a carousel slide
 function loadCarouselSlide(idx, post) {
+  const gen = modalGeneration;
   const items = post.carouselMedia;
   const item = items[idx];
   const slides = document.querySelectorAll('.carousel-slide');
@@ -1780,7 +2037,7 @@ function loadCarouselSlide(idx, post) {
       if (nextIdx < items.length) {
         goToCarouselSlide(nextIdx, post);
       } else {
-        navigateModal(1);
+        advanceModalToNext();
       }
     });
 
@@ -1807,6 +2064,8 @@ function loadCarouselSlide(idx, post) {
       postId: post.id,
       carouselIndex: idx
     }, (response) => {
+      // Ignore a late resolution once the user has moved on.
+      if (gen !== modalGeneration) return;
       if (response && response.success && response.videoUrl) {
         cacheModalMedia(cacheKey, { isVideo: true, url: response.videoUrl, extension: 'mp4' });
         const video = createVideoElement(response.videoUrl);
@@ -1831,7 +2090,7 @@ function loadCarouselSlide(idx, post) {
           if (nextIdx < items.length) {
             goToCarouselSlide(nextIdx, post);
           } else {
-            navigateModal(1);
+            advanceModalToNext();
           }
         });
 
@@ -1945,10 +2204,16 @@ function goToCarouselSlide(idx, post) {
       attemptPlay(video);
     }
   }
+
+  // If this slide is an image, keep autoplay moving after a short hold.
+  scheduleAutoplayCarouselImageAdvance(post, idx);
 }
 
 // Render single video in modal
 function renderVideoModal(post, container) {
+  // Capture the modal context this render belongs to; if the user navigates or
+  // closes before the async fetch resolves, we must not append/play the video.
+  const gen = modalGeneration;
   const posterUrl = post.image || post.thumbnail || '';
   const videoShell = createModalVideoShell(posterUrl);
 
@@ -1964,6 +2229,7 @@ function renderVideoModal(post, container) {
   const cachedMedia = modalMediaCache.get(cacheKey);
 
   const applyVideoToContainer = (videoUrl) => {
+    if (gen !== modalGeneration) return;
     currentModalVideoUrl = videoUrl;
     // Successful load -> the post is available again; clear any stale flag.
     setPostUnavailableState(post, false);
@@ -2003,8 +2269,10 @@ function renderVideoModal(post, container) {
     permalink: post.link,
     postId: post.id
   }, (response) => {
+    if (gen !== modalGeneration) return;
+
     if (chrome.runtime.lastError) {
-      container.innerHTML = `<p class="error-message">${t('failedToLoadVideo')}</p>`;
+      renderUnavailableState(container, post, { message: t('failedToLoadVideo'), unavailable: false });
       return;
     }
 
@@ -2016,7 +2284,14 @@ function renderVideoModal(post, container) {
       setPostUnavailableState(post, true);
       renderUnavailableState(container, post);
     } else {
-      container.innerHTML = `<p class="error-message">${t('failedToLoadVideoWithReason', { error: response?.error || t('unknownError') })}</p>`;
+      // The video wouldn't load and Instagram didn't hand us its explicit
+      // "unavailable" page (common for genuinely deleted reels). Don't silently
+      // dead-end -- still offer a Remove button so the user can clear the stale
+      // post, but leave the grid flag alone since we can't be certain it's gone.
+      renderUnavailableState(container, post, {
+        message: t('failedToLoadVideoWithReason', { error: response?.error || t('unknownError') }),
+        unavailable: false
+      });
     }
   });
 }
@@ -2059,17 +2334,25 @@ function renderImageModal(post, container) {
 
 // Close modal
 function closeModal() {
+  // Invalidate in-flight media callbacks and stop the image-autoplay timer so
+  // nothing gets appended or plays after the modal is gone.
+  modalGeneration++;
+  clearAutoplayImageTimer();
+  disposePreloadBuffer();
+
   const modal = document.getElementById('modal');
+
+  // Stop every modal video (belt-and-braces: also catch any that slipped
+  // outside #modal-media) so audio never keeps playing in the background.
+  modal.querySelectorAll('video').forEach(video => {
+    video.pause();
+    video.currentTime = 0;
+    video.removeAttribute('src');
+    video.load();
+  });
 
   const mediaContainer = modal.querySelector('#modal-media');
   if (mediaContainer) {
-    const videos = mediaContainer.querySelectorAll('video');
-    videos.forEach(video => {
-      video.pause();
-      video.currentTime = 0;
-      video.src = '';
-    });
-
     mediaContainer.innerHTML = '';
   }
 
@@ -2168,6 +2451,7 @@ function restoreSyncingState() {
   if (completeSection) completeSection.style.display = 'none';
   if (headerBtn) headerBtn.classList.add('syncing');
   if (resumeInfo) resumeInfo.style.display = 'none';
+  syncTotalFinalized = false;
   setTotalTileEstimated(true);
 }
 
@@ -2345,6 +2629,7 @@ function importData(file) {
 
 function startSync() {
   isSyncing = true;
+  syncTotalFinalized = false;
   setSyncGridBanner(true);
   setTotalTileEstimated(true);
   const startBtn = document.getElementById('sync-start-btn');
@@ -2403,13 +2688,17 @@ function updateSyncPanelProgress(synced, failed, total = 0) {
   document.getElementById('sync-synced-count').textContent = syncedSafe;
   document.getElementById('sync-failed-count').textContent = failedSafe;
   const totalElement = document.getElementById('sync-total-count');
-  // Only update total when we have a meaningful value. A transient 0 from the
-  // content script (unknown total) should not wipe a previously known total.
-  if (typeof total === 'number' && total > 0) {
-    lastKnownSyncTotal = total;
-  }
-  if (totalElement) {
-    totalElement.textContent = (lastKnownSyncTotal > 0) ? lastKnownSyncTotal : (typeof total === 'number' ? total : 0);
+  // Once finalized (sync complete), the TOTAL tile holds the real synced count --
+  // never let a straggling progress update overwrite it with the estimate.
+  if (!syncTotalFinalized) {
+    // Only update total when we have a meaningful value. A transient 0 from the
+    // content script (unknown total) should not wipe a previously known total.
+    if (typeof total === 'number' && total > 0) {
+      lastKnownSyncTotal = total;
+    }
+    if (totalElement) {
+      totalElement.textContent = (lastKnownSyncTotal > 0) ? lastKnownSyncTotal : (typeof total === 'number' ? total : 0);
+    }
   }
 
   const progressBar = document.getElementById('sync-progress-bar');
@@ -2457,7 +2746,10 @@ function handleSyncComplete(syncedCount, failedCount) {
   if (progressBar) progressBar.style.width = '100%';
 
   // Sync finished: the estimate is no longer relevant -- show the real number of
-  // posts we actually have and drop the "Estimated" qualifier.
+  // posts we actually have and drop the "Estimated" qualifier. Latch it so no
+  // late progress message can revert the tile back to the estimate.
+  syncTotalFinalized = true;
+  lastKnownSyncTotal = syncedCount;
   const totalEl = document.getElementById('sync-total-count');
   if (totalEl) totalEl.textContent = syncedCount;
   setTotalTileEstimated(false);

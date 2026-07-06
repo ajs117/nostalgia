@@ -1604,7 +1604,21 @@ async function runAutoRebuildIfDrifted(result) {
   }
 }
 
-chrome.runtime.onMessage.addListener(async (request) => {
+// NOTE: this listener must NOT be declared `async`. An async listener returns a
+// Promise, which recent Chrome treats as "this listener will respond
+// asynchronously" and then resolves it to `undefined`. Because a second
+// onMessage listener below actually answers BUMP_POST_TO_TOP /
+// ADD_POST_TO_NOSTALGIA_COLLECTION via sendResponse, the two race and the caller
+// often receives `undefined` first -> "No response from Instagram tab". Keeping
+// this one synchronous (delegating to a fire-and-forget async helper) leaves the
+// response channel entirely to the second listener.
+chrome.runtime.onMessage.addListener((request) => {
+  handleContentScriptSyncMessage(request);
+  // Synchronous return: this listener never uses sendResponse.
+  return false;
+});
+
+async function handleContentScriptSyncMessage(request) {
   if (request.action === 'SHOW_SYNC_DRAWER') {
     // Sync drawer removed - sync is now handled entirely in the main app
     // No drawer should be shown on Instagram pages
@@ -1691,7 +1705,7 @@ chrome.runtime.onMessage.addListener(async (request) => {
       }
     }
   }
-});
+}
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'ADD_POST_TO_NOSTALGIA_COLLECTION') {

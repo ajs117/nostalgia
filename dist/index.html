@@ -58,6 +58,13 @@
             <option value="light" data-i18n="themeLight">Light</option>
           </select>
         </label>
+        <label class="settings-toggle-group" for="auto-sync-toggle">
+          <span class="settings-toggle-text">
+            <span class="header-select-label" data-i18n="autoSync">Auto-sync on startup</span>
+            <span class="settings-toggle-hint" data-i18n="autoSyncDescription">Automatically sync new saved posts each time you open nostalgia.</span>
+          </span>
+          <input type="checkbox" id="auto-sync-toggle" class="settings-toggle-input">
+        </label>
       </div>
 
       <div class="sync-maintenance-zone">
@@ -322,6 +329,7 @@
           <div class="modal-toggle-row">
             <button id="modal-autoplay-btn" class="modal-action-btn modal-toggle-btn" type="button"></button>
             <button id="modal-loop-btn" class="modal-action-btn modal-toggle-btn" type="button"></button>
+            <button id="modal-skip-btn" class="modal-action-btn modal-skip-btn" type="button" data-i18n="skipNext">Skip ⏭</button>
           </div>
           <button id="modal-bump-btn" class="modal-action-btn modal-secondary-btn" type="button" data-i18n="bumpToTop">Bump to Top</button>
           <button id="modal-download-btn" class="modal-action-btn modal-secondary-btn" type="button" data-i18n="downloadMedia">Download Media</button>

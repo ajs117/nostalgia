@@ -120,6 +120,18 @@ function throttleSyncProgressBroadcast(payload) {
   }
 }
 
+// Drop any queued progress broadcast. Must be called right before SYNC_COMPLETE
+// (or SYNC_STOPPED) is sent: otherwise a trailing throttled SYNC_PROGRESS can
+// fire ~500ms later and overwrite the final total with the (larger) estimate,
+// which is why the tile appeared to "revert to the estimated total" on complete.
+function cancelPendingSyncProgressBroadcast() {
+  if (syncProgressBroadcastTimeout) {
+    clearTimeout(syncProgressBroadcastTimeout);
+    syncProgressBroadcastTimeout = null;
+  }
+  pendingSyncProgressPayload = null;
+}
+
 // Safe message sender that handles closed channels
 function safeSendToTab(tabId, message) {
   if (!tabId) return;
@@ -653,6 +665,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'SYNC_FINISHED') {
+    cancelPendingSyncProgressBroadcast();
     const completeMsg = {
       action: 'SYNC_COMPLETE',
       syncedCount: request.syncedCount,
@@ -716,6 +729,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'SYNC_STOPPED') {
+    cancelPendingSyncProgressBroadcast();
     const stoppedMsg = {
       action: 'SYNC_STOPPED',
       syncedCount: request.syncedCount,
@@ -840,6 +854,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             return;
           }
           shouldCloseTab = true;
+
+          // Mute the scraping tab. Instagram autoplays the reel while we read the
+          // CDN URL out of the page, and (especially during autoplay preload of
+          // the *next* post) that audio would otherwise play out loud in the
+          // background while the user is still watching the current video.
+          chrome.tabs.update(tab.id, { muted: true }, () => {
+            if (chrome.runtime.lastError) { /* tab may already be gone */ }
+          });
 
           hideListener = (activeInfo) => {
             if (activeInfo.tabId === tab.id) {
