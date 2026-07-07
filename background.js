@@ -355,6 +355,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return false;
   }
 
+  // Authoritative "is a sync running right now?" for the viewer UI. The page
+  // can reload (or open fresh) mid-sync; without this it guesses and gets the
+  // buttons/progress state wrong.
+  if (request.action === 'GET_SYNC_STATE') {
+    sendResponse({ syncing: syncInProgress && activeInstagramTabId !== null });
+    return false;
+  }
+
   if (request.action === 'CAPTURE_IMAGES') {
     capturedImages = Array.isArray(request.images) ? request.images : [];
 
@@ -580,14 +588,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     const postIds = request.postIds || [];
     const links = request.links || [];
 
-    // Process all checks and return results
-    Promise.all(postIds.map((id, index) => checkPostExists(id, links[index])))
+    checkPostsBatchExists(postIds, links)
       .then((results) => {
         sendResponse({ results });
       })
       .catch((error) => {
         console.error('Error in batch existence check:', error);
-        sendResponse({ results: postIds.map(() => false) });
+        // results:null, NOT all-false. "Couldn't check" must never read as
+        // "none of these exist": that made the sync treat the whole library as
+        // new (full feed re-walk) and false-triggered order-drift rebuilds.
+        sendResponse({ results: null, error: error.message || 'existence check failed' });
       });
     return true;
   }
@@ -804,9 +814,20 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   if (request.action === 'IMPORT_FAILED') {
     syncInProgress = false;
+    cancelPendingSyncProgressBroadcast();
     safeBroadcast({ action: 'IMPORT_FAILED', error: request.error });
     if (activeInstagramTabId) {
       safeSendToTab(activeInstagramTabId, { action: 'IMPORT_FAILED', error: request.error });
+      // Close the background sync tab; leaving it open kept stale tab/state
+      // around that confused the next sync attempt.
+      setTimeout(() => {
+        if (activeInstagramTabId) {
+          chrome.tabs.remove(activeInstagramTabId, () => {
+            if (chrome.runtime.lastError) { /* tab may already be closed */ }
+            activeInstagramTabId = null;
+          });
+        }
+      }, 1000);
     }
     return false;
   }
@@ -1653,37 +1674,68 @@ async function addPostsToIndexedDB(posts) {
 // Get posts count from metadata (O(1))
 async function getPostsCount() {
   let db;
+  let metaCount;
   try {
     db = await openDB();
-    return new Promise((resolve, reject) => {
+    metaCount = await new Promise((resolve, reject) => {
       const transaction = db.transaction([STORE_METADATA], 'readonly');
       const store = transaction.objectStore(STORE_METADATA);
       const request = store.get('posts_count');
 
-      request.onsuccess = () => {
-        db.close();
-        resolve(request.result || 0);
-      };
-      request.onerror = () => {
-        db.close();
-        // Fallback: count posts directly. If even that fails, propagate the
-        // error -- returning 0 here made "DB unreadable" indistinguishable from
-        // "DB empty", which tricked the sync into a full re-download.
-        countPostsDirectly().then(resolve).catch(reject);
-      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error('metadata read failed'));
     });
+    db.close();
+    db = null;
   } catch (error) {
     if (db) db.close();
-    throw error;
+    // Metadata unreadable: fall through to the direct count below rather than
+    // failing outright.
+    metaCount = undefined;
   }
+
+  if (typeof metaCount === 'number' && metaCount > 0) {
+    return metaCount;
+  }
+
+  // Metadata says 0 or is missing. That can be a stale/corrupted cache (e.g.
+  // left behind by an interrupted sync), and trusting it made the sync treat a
+  // full library as empty and re-download everything. Verify against the posts
+  // store itself and repair the cache when they disagree.
+  const directCount = await countPostsDirectly();
+  if (directCount > 0) {
+    try {
+      await setPostsCountMetadata(directCount);
+      console.warn(`Repaired stale posts_count metadata: ${metaCount} -> ${directCount}`);
+    } catch (e) { /* repair is best-effort; the returned count is still right */ }
+  }
+  return directCount;
 }
 
-// Fallback count method
+// Write the posts_count metadata cache (used to repair a stale value).
+async function setPostsCountMetadata(count) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction([STORE_METADATA], 'readwrite');
+    transaction.objectStore(STORE_METADATA).put(count, 'posts_count');
+    transaction.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+    transaction.onerror = () => {
+      db.close();
+      reject(transaction.error);
+    };
+  });
+}
+
+// Fallback count method. Rejects when the store can't be read -- callers must
+// not mistake "unreadable" for "empty" (that's what caused full re-syncs).
 async function countPostsDirectly() {
   let db;
   try {
     db = await openDB();
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       const transaction = db.transaction([STORE_POSTS], 'readonly');
       const store = transaction.objectStore(STORE_POSTS);
       const countRequest = store.count();
@@ -1694,16 +1746,80 @@ async function countPostsDirectly() {
       };
       countRequest.onerror = () => {
         db.close();
-        resolve(0);
+        reject(countRequest.error || new Error('posts count failed'));
       };
     });
   } catch (error) {
     if (db) db.close();
-    return 0;
+    throw error;
   }
 }
 
 
+
+// Batch existence check on a single DB connection/transaction. The previous
+// implementation opened one connection per post (21+ parallel opens per feed
+// page), which was slow and failure-prone on large libraries; any failure was
+// then misreported as "not saved". Rejects on error so callers can retry.
+async function checkPostsBatchExists(postIds, links) {
+  if (!postIds || postIds.length === 0) return [];
+
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction([STORE_POSTS], 'readonly');
+    const store = transaction.objectStore(STORE_POSTS);
+    const linkIndex = store.index('link');
+    const results = new Array(postIds.length).fill(false);
+    let pending = postIds.length;
+    let failed = false;
+
+    const settleOne = () => {
+      pending--;
+      if (pending === 0 && !failed) {
+        db.close();
+        resolve(results);
+      }
+    };
+
+    const fail = (error) => {
+      if (failed) return;
+      failed = true;
+      db.close();
+      reject(error || new Error('existence lookup failed'));
+    };
+
+    postIds.forEach((postId, i) => {
+      const checkByLink = () => {
+        const link = links[i];
+        if (!link) {
+          settleOne();
+          return;
+        }
+        const linkRequest = linkIndex.get(link);
+        linkRequest.onsuccess = () => {
+          results[i] = !!linkRequest.result;
+          settleOne();
+        };
+        linkRequest.onerror = () => fail(linkRequest.error);
+      };
+
+      if (postId) {
+        const getRequest = store.get(postId);
+        getRequest.onsuccess = () => {
+          if (getRequest.result) {
+            results[i] = true;
+            settleOne();
+          } else {
+            checkByLink();
+          }
+        };
+        getRequest.onerror = () => fail(getRequest.error);
+      } else {
+        checkByLink();
+      }
+    });
+  });
+}
 
 // Check if a post exists using direct store lookups
 async function checkPostExists(postId, link) {

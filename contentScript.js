@@ -976,18 +976,36 @@ function syncDelay(ms) {
 }
 
 // Batch existence check against the local DB for a page of API items.
-function checkExistenceBatch(items) {
+async function checkExistenceBatch(items, maxAttempts = 3) {
   const postIds = items.map((p) => p.id || `${p.user?.username}-${p.code}`);
   const links = items.map((p) => `https://www.instagram.com/p/${p.code}/`);
-  return new Promise((resolve) => {
+
+  const askOnce = () => new Promise((resolve) => {
     chrome.runtime.sendMessage({
       action: 'CHECK_POSTS_BATCH_EXISTS',
       postIds,
       links
     }, (response) => {
-      resolve(response?.results || postIds.map(() => false));
+      if (chrome.runtime.lastError || !response || !Array.isArray(response.results)) {
+        resolve(null);
+      } else {
+        resolve(response.results);
+      }
     });
   });
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const results = await askOnce();
+    if (results) return results;
+    if (attempt < maxAttempts) {
+      await new Promise((resolve) => setTimeout(resolve, 500 * attempt));
+    }
+  }
+
+  // Throw rather than default to "nothing exists": that default made the sync
+  // treat the entire library as new (full re-walk of the feed) and produced
+  // false order-drift detections. The phase loops catch this and back off.
+  throw new Error('Could not check saved-post existence against the local library');
 }
 
 function getSyncOrdering() {
@@ -1140,6 +1158,8 @@ async function readLibraryStateReliably(maxAttempts = 4) {
     }
   });
 
+  let lastState = null;
+
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const [countRes, boundsRes] = await Promise.all([
       ask({ action: 'GET_POSTS_COUNT' }),
@@ -1158,9 +1178,21 @@ async function readLibraryStateReliably(maxAttempts = 4) {
       return { postsCount, dbBounds };
     }
 
+    if (postsCount !== null && dbBounds) {
+      lastState = { postsCount, dbBounds };
+    }
+
     if (attempt < maxAttempts) {
       await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
     }
+  }
+
+  // Messaging worked but count/bounds stayed contradictory: the bounds prove
+  // posts exist, so treat the library as NON-empty (protects it from a
+  // from-scratch re-download) and let the count catch up later. Only give up
+  // entirely (null) when the background never answered at all.
+  if (lastState) {
+    return { postsCount: Math.max(lastState.postsCount, 1), dbBounds: lastState.dbBounds };
   }
 
   return null;
@@ -1290,8 +1322,10 @@ async function getInstagramSavedPosts() {
           if (!isSyncing) break;
           console.error(`Error in top-phase fetch: ${error.message}`);
           retryCount++;
-          if (retryCount > 3) break;
-          await syncDelay(5000);
+          if (retryCount > 6) break;
+          // Back off harder each attempt: Instagram rate limits (HTTP 572) last
+          // minutes, and giving up after ~15s made big syncs "stop" midway.
+          await syncDelay(Math.min(60000, 5000 * retryCount));
         }
       }
 
@@ -1379,8 +1413,10 @@ async function getInstagramSavedPosts() {
           if (!isSyncing) break;
           console.error(`Error in backfill-phase fetch: ${error.message}`);
           retryCount++;
-          if (retryCount > 3) break;
-          await syncDelay(5000);
+          if (retryCount > 6) break;
+          // Back off harder each attempt: Instagram rate limits (HTTP 572) last
+          // minutes, and giving up after ~15s made big syncs "stop" midway.
+          await syncDelay(Math.min(60000, 5000 * retryCount));
         }
       }
     }
@@ -1471,8 +1507,19 @@ async function rebuildSavedOrder() {
     }
 
     const resume = await loadRebuildState();
-    // Newest gets the highest value; we count down as we walk older.
-    let nextOrder = resume ? resume.nextOrder : (totalSavedCount > 0 ? totalSavedCount : 1000000000);
+    // Newest gets the highest value; we count down as we walk older. The range
+    // must start ABOVE everything already in the DB: posts that are no longer
+    // in the feed (deleted/private) keep their old savedOrder, and if the
+    // rebuilt range started lower (e.g. at Instagram's total), those dead posts
+    // would float to the top of "Newest Saved" -- scrambled-looking order.
+    const bounds = await new Promise((resolve) => {
+      chrome.runtime.sendMessage({ action: 'GET_DB_BOUNDS' }, (response) => {
+        resolve((response && !response.error) ? response : { min: null, max: null });
+      });
+    });
+    const dbMax = (bounds && typeof bounds.max === 'number') ? bounds.max : 0;
+    const span = Math.max(totalSavedCount, 1000000);
+    let nextOrder = resume ? resume.nextOrder : Math.max(dbMax, 0) + span;
     let cursor = resume ? resume.cursor : '';
     let processed = 0;
     let moreAvailable = true;
@@ -1514,8 +1561,10 @@ async function rebuildSavedOrder() {
         if (!isSyncing) break;
         console.error(`Error in rebuild fetch: ${error.message}`);
         retryCount++;
-        if (retryCount > 3) break;
-        await syncDelay(5000);
+        if (retryCount > 6) break;
+        // Back off harder each attempt: Instagram rate limits (HTTP 572) last
+        // minutes, and giving up after ~15s made big syncs "stop" midway.
+        await syncDelay(Math.min(60000, 5000 * retryCount));
       }
     }
 

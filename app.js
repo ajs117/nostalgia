@@ -428,6 +428,19 @@ function initializePreferences() {
   }
 }
 
+// On load, ask the background whether a sync is already running (the page may
+// have been reloaded/opened mid-sync). If so, adopt that state; otherwise run
+// the auto-sync-on-startup option.
+function adoptRunningSyncThenMaybeAutoStart() {
+  chrome.runtime.sendMessage({ action: 'GET_SYNC_STATE' }, (response) => {
+    if (!chrome.runtime.lastError && response && response.syncing) {
+      handleSyncStarted();
+      return;
+    }
+    maybeAutoStartSync();
+  });
+}
+
 // When enabled in Settings, kick off a sync shortly after the viewer opens so
 // newly saved posts show up without the user pressing Sync. Skipped if a sync is
 // already running. PINGs the service worker first (with retries) so a cold
@@ -645,7 +658,7 @@ document.addEventListener('DOMContentLoaded', () => {
   setupMobileFilters();
   setupSyncPanel();
   setupSettingsModal();
-  maybeAutoStartSync();
+  adoptRunningSyncThenMaybeAutoStart();
 
   // Clear any stale sync status on fresh page load
   // The status will be updated if there's an active sync via messages
@@ -877,11 +890,10 @@ function handleRandomReshuffle() {
 function setupMessageListener() {
   chrome.runtime.onMessage.addListener((request) => {
     if (request.action === 'UPDATE_ITEMS') {
-      // While a sync/rebuild is running, posts are being inserted/reordered
-      // continuously. Reloading the grid on every update makes items jump
-      // between pages, so we keep the view stable and show a banner instead.
       if (isSyncing || isRebuilding) {
-        setSyncGridBanner(true);
+        // Auto-refresh the grid as new posts arrive, debounced so the view
+        // updates every few seconds instead of thrashing on every batch.
+        scheduleSyncGridRefresh();
       } else {
         loadPosts();
         scheduleFetchAllHashtags(); // Refresh hashtags when posts are updated (debounced)
@@ -892,7 +904,6 @@ function setupMessageListener() {
       updateSyncPanelProgress(request.synced, request.failed, request.total);
     } else if (request.action === 'SYNC_COMPLETE') {
       handleSyncComplete(request.syncedCount, request.failedCount);
-      setSyncGridBanner(false);
       currentPage = 1;
       loadPosts();
       scheduleFetchAllHashtags(); // Refresh hashtags after sync (debounced)
@@ -901,7 +912,6 @@ function setupMessageListener() {
     } else if (request.action === 'IMPORT_FAILED') {
       handleSyncError(request.error || 'Sync failed. Please try again.');
     } else if (request.action === 'SYNC_STOPPED') {
-      setSyncGridBanner(false);
       handleSyncStopped(request.syncedCount, request.failedCount);
     } else if (request.action === 'REBUILD_STARTED') {
       handleRebuildStarted();
@@ -914,50 +924,33 @@ function setupMessageListener() {
   });
 }
 
-// Keep the grid stable while a sync/rebuild is mutating order in the background.
-function setSyncGridBanner(visible) {
-  const banner = document.getElementById('sync-grid-banner');
-  if (!banner) return;
-
-  if (visible) {
-    if (banner.dataset.active === 'true') return;
-    banner.dataset.active = 'true';
-    banner.innerHTML = '';
-
-    const label = document.createElement('span');
-    label.textContent = isRebuilding ? t('rebuildBannerRunning') : t('syncBannerUpdating');
-    banner.appendChild(label);
-
-    const refresh = document.createElement('button');
-    refresh.className = 'sync-banner-refresh';
-    refresh.textContent = t('showNewPosts');
-    refresh.addEventListener('click', () => {
-      currentPage = 1;
-      loadPosts();
-    });
-    banner.appendChild(refresh);
-
-    banner.style.display = 'flex';
-  } else {
-    banner.dataset.active = 'false';
-    banner.style.display = 'none';
-    banner.innerHTML = '';
-  }
+// Debounced grid refresh while a sync/rebuild streams posts in. One reload at
+// most every few seconds, and never while the modal is open (that would yank
+// the user out of whatever they're watching); it re-arms and catches up after.
+let syncGridRefreshTimer = null;
+function scheduleSyncGridRefresh() {
+  if (syncGridRefreshTimer) return;
+  syncGridRefreshTimer = setTimeout(() => {
+    syncGridRefreshTimer = null;
+    if (currentModalIndex >= 0) {
+      scheduleSyncGridRefresh();
+      return;
+    }
+    loadPosts();
+    scheduleFetchAllHashtags();
+  }, 4000);
 }
 
 // The saved-order rebuild is triggered automatically by the background sync
 // when it detects drift (see contentScript.js) -- there's no manual entry
-// point, but we still surface progress via the same grid banner/status line
-// sync uses.
+// point, but we still surface progress via the status line sync uses.
 function handleRebuildStarted() {
   isRebuilding = true;
-  setSyncGridBanner(true);
   updateLocalizedSyncStatus('syncing', 'rebuilding');
 }
 
 function handleRebuildComplete() {
   isRebuilding = false;
-  setSyncGridBanner(false);
   updateSyncStatus('', '');
   currentPage = 1;
   loadPosts();
@@ -2502,13 +2495,17 @@ function checkSyncProgress() {
 }
 
 function clearSyncProgress() {
-  chrome.storage.local.remove(['instagram_sync_progress'], () => {
+  // "Clear" means start fresh: drop the resume marker AND the backfill/rebuild
+  // cursors. Leaving the cursors behind made the next sync silently resume
+  // mid-history while the UI claimed a clean slate.
+  chrome.storage.local.remove(['instagram_sync_progress', 'nostalgia_sync_cursor', 'nostalgia_rebuild_state'], () => {
     checkSyncProgress();
     document.getElementById('sync-synced-count').textContent = '0';
     document.getElementById('sync-failed-count').textContent = '0';
     const totalElement = document.getElementById('sync-total-count');
     if (totalElement) totalElement.textContent = '0';
     lastKnownSyncTotal = 0;
+    syncTotalFinalized = false;
   });
 }
 
@@ -2642,7 +2639,6 @@ function importData(file) {
 function startSync() {
   isSyncing = true;
   syncTotalFinalized = false;
-  setSyncGridBanner(true);
   setTotalTileEstimated(true);
   const startBtn = document.getElementById('sync-start-btn');
   const stopBtn = document.getElementById('sync-stop-btn');
@@ -2679,6 +2675,11 @@ function stopSync() {
 }
 
 function handleSyncStarted() {
+  // SYNC_STARTED can arrive on a page that didn't click Start (fresh load or
+  // reload while a background sync runs). Adopt the syncing state fully so the
+  // buttons/bar reflect reality instead of guessing.
+  isSyncing = true;
+  restoreSyncingState();
   document.getElementById('sync-progress-bar').style.width = '10%';
   updateLocalizedSyncStatus('syncing', 'preparing');
 }
