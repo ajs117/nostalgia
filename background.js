@@ -1,6 +1,3 @@
-/** @type {string[]} */
-let capturedImages = [];
-let capturedImagesCleanupTimeout = null;
 let extensionTabId = null;
 let activeInstagramTabId = null;
 // True while a saved-posts sync is running. Video-URL lookups must NOT touch the
@@ -10,9 +7,24 @@ let syncInProgress = false;
 // A dedicated tab for tab-free video-URL lookups, kept entirely separate from
 // activeInstagramTabId (the sync tab) so the two never interfere.
 let videoApiTabId = null;
+// Whether WE opened that tab (may auto-close it when idle) or adopted one the
+// user already had open (must never close it).
+let videoApiTabOwned = false;
 
 // Mutex for preventing race conditions in batch saves
 let batchSaveLock = Promise.resolve();
+
+// Translate low-level storage failures into something actionable. Quota
+// exhaustion in particular otherwise surfaces as a cryptic DOMException and
+// posts just silently pile into the FAILED counter.
+function describeStorageError(error) {
+  const name = error?.name || '';
+  const message = error?.message || 'Unknown storage error';
+  if (name === 'QuotaExceededError' || /quota/i.test(message)) {
+    return 'Browser storage is full. Free up disk space or clear other site data, then resume the sync.';
+  }
+  return message;
+}
 
 // MV3 kills the service worker after ~30s idle -- easily hit while a sync sits
 // in a rate-limit backoff. In-memory sync state must survive that restart or
@@ -24,7 +36,7 @@ const SYNC_STATE_SESSION_KEY = 'nostalgia_sw_sync_state';
 function persistSyncState() {
   try {
     chrome.storage.session.set({
-      [SYNC_STATE_SESSION_KEY]: { syncInProgress, activeInstagramTabId }
+      [SYNC_STATE_SESSION_KEY]: { syncInProgress, activeInstagramTabId, videoApiTabId, videoApiTabOwned }
     });
   } catch (e) { /* storage.session unavailable: state stays in-memory only */ }
 }
@@ -33,6 +45,16 @@ try {
   chrome.storage.session.get([SYNC_STATE_SESSION_KEY], (result) => {
     const saved = result && result[SYNC_STATE_SESSION_KEY];
     if (!saved || syncInProgress) return;
+
+    if (saved.videoApiTabId && videoApiTabId === null) {
+      chrome.tabs.get(saved.videoApiTabId, (tab) => {
+        if (!chrome.runtime.lastError && tab) {
+          videoApiTabId = saved.videoApiTabId;
+          videoApiTabOwned = !!saved.videoApiTabOwned;
+        }
+      });
+    }
+
     const tabId = saved.activeInstagramTabId;
     if (!tabId) return;
     // Validate against reality: the tab may have been closed while the worker
@@ -47,6 +69,32 @@ try {
     });
   });
 } catch (e) { /* ignore */ }
+
+// Close the video-lookup tab after a few idle minutes so it doesn't linger for
+// the rest of the browser session. chrome.alarms survives service-worker
+// restarts (a plain setTimeout would die with the worker).
+const VIDEO_API_TAB_IDLE_ALARM = 'nostalgia-close-video-api-tab';
+const VIDEO_API_TAB_IDLE_MINUTES = 5;
+
+function touchVideoApiTab() {
+  try {
+    chrome.alarms.create(VIDEO_API_TAB_IDLE_ALARM, { delayInMinutes: VIDEO_API_TAB_IDLE_MINUTES });
+  } catch (e) { /* alarms unavailable: tab stays until browser close */ }
+}
+
+if (chrome.alarms && chrome.alarms.onAlarm) {
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name !== VIDEO_API_TAB_IDLE_ALARM) return;
+    // Only close a tab we opened ourselves -- adopted user tabs are off-limits.
+    if (videoApiTabId === null || !videoApiTabOwned) return;
+    chrome.tabs.remove(videoApiTabId, () => {
+      if (chrome.runtime.lastError) { /* already closed */ }
+      videoApiTabId = null;
+      videoApiTabOwned = false;
+      persistSyncState();
+    });
+  });
+}
 
 chrome.action.onClicked.addListener(() => {
   chrome.tabs.create({ url: chrome.runtime.getURL('index.html') }, (newTab) => {
@@ -67,6 +115,8 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   }
   if (tabId === videoApiTabId) {
     videoApiTabId = null;
+    videoApiTabOwned = false;
+    persistSyncState();
   }
 });
 
@@ -332,6 +382,8 @@ function pickOrCreateVideoApiTab(resolve, reject) {
     const usable = (tabs || []).find((t) => t.id !== activeInstagramTabId);
     if (usable) {
       videoApiTabId = usable.id;
+      videoApiTabOwned = false; // the user's tab -- never auto-close it
+      persistSyncState();
       resolve(videoApiTabId);
       return;
     }
@@ -341,6 +393,8 @@ function pickOrCreateVideoApiTab(resolve, reject) {
         return;
       }
       videoApiTabId = newTab.id;
+      videoApiTabOwned = true; // we opened it, we may close it when idle
+      persistSyncState();
       waitForTabToComplete(newTab.id).then(resolve).catch(reject);
     });
   });
@@ -362,6 +416,7 @@ function fetchVideoViaContentApi(mediaId, carouselIndex = null) {
     }
 
     ensureVideoApiTab().then((tabId) => {
+      touchVideoApiTab();
       chrome.tabs.sendMessage(
         tabId,
         { action: 'FETCH_MEDIA_VIDEO', mediaId, carouselIndex },
@@ -398,37 +453,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return false;
   }
 
-  if (request.action === 'CAPTURE_IMAGES') {
-    capturedImages = Array.isArray(request.images) ? request.images : [];
-
-    // Prevent unbounded memory retention if very large payloads are captured.
-    // Keep only the most recent items.
-    const MAX_CAPTURED_IMAGES = 500;
-    if (capturedImages.length > MAX_CAPTURED_IMAGES) {
-      capturedImages = capturedImages.slice(-MAX_CAPTURED_IMAGES);
-    }
-
-    // Auto-clear after a short period to avoid keeping large blobs in memory.
-    if (capturedImagesCleanupTimeout) {
-      clearTimeout(capturedImagesCleanupTimeout);
-    }
-    capturedImagesCleanupTimeout = setTimeout(() => {
-      capturedImages = [];
-      capturedImagesCleanupTimeout = null;
-    }, 2 * 60 * 1000);
-    return false;
-  }
-
   if (request.action === 'FETCH_IMAGE') {
     fetchImageAsDataURL(request.imageUrl)
       .then((dataUrl) => sendResponse({ success: true, dataUrl: dataUrl }))
       .catch((error) => sendResponse({ success: false, error: error.message }));
     return true;
-  }
-
-  if (request.action === 'GET_CAPTURED_IMAGES') {
-    sendResponse(capturedImages);
-    return false;
   }
 
   if (request.action === 'OPEN_MAIN_VIEWER') {
@@ -797,11 +826,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         sendResponse({ success: true, added: addedCount });
       } catch (error) {
         console.error('Error saving batch:', error);
-        sendResponse({ success: false, error: error.message });
+        sendResponse({ success: false, error: describeStorageError(error) });
       }
     }).catch((error) => {
       console.error('Error in batch save lock:', error);
-      sendResponse({ success: false, error: error.message });
+      sendResponse({ success: false, error: describeStorageError(error) });
     });
     return true;
   }
@@ -1506,23 +1535,78 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
 
-  if (request.action === 'EXPORT_DATA') {
-    exportAllData().then((data) => {
-      sendResponse({ success: true, data });
+  // ---- Chunked backup protocol -------------------------------------------
+  // The viewer drives export/import in slices so no single runtime message has
+  // to carry the whole library (a 25k-post backup as one message blew past
+  // Chrome's message-size/memory limits).
+
+  if (request.action === 'EXPORT_MANIFEST') {
+    getExportManifest().then((manifest) => {
+      sendResponse({ success: true, ...manifest });
     }).catch((error) => {
-      console.error('Error exporting data:', error);
-      sendResponse({ success: false, error: error.message });
+      console.error('Error building export manifest:', error);
+      sendResponse({ success: false, error: describeStorageError(error) });
     });
     return true;
   }
 
-  if (request.action === 'IMPORT_DATA') {
-    importAllData(request.data).then((result) => {
+  if (request.action === 'EXPORT_POSTS_CHUNK') {
+    getPostsChunk(request.offset || 0, request.limit || 1000).then((posts) => {
+      sendResponse({ success: true, posts });
+    }).catch((error) => {
+      console.error('Error exporting posts chunk:', error);
+      sendResponse({ success: false, error: describeStorageError(error) });
+    });
+    return true;
+  }
+
+  if (request.action === 'EXPORT_MEDIA_CHUNK') {
+    getMediaChunk(request.keys || []).then((media) => {
+      sendResponse({ success: true, media });
+    }).catch((error) => {
+      console.error('Error exporting media chunk:', error);
+      sendResponse({ success: false, error: describeStorageError(error) });
+    });
+    return true;
+  }
+
+  if (request.action === 'IMPORT_BEGIN') {
+    importCollectionsAndMetadata(request.collections, request.metadata).then(() => {
+      sendResponse({ success: true });
+    }).catch((error) => {
+      console.error('Error importing collections/metadata:', error);
+      sendResponse({ success: false, error: describeStorageError(error) });
+    });
+    return true;
+  }
+
+  if (request.action === 'IMPORT_POSTS_CHUNK') {
+    importPostsChunk(request.posts || []).then(() => {
+      sendResponse({ success: true });
+    }).catch((error) => {
+      console.error('Error importing posts chunk:', error);
+      sendResponse({ success: false, error: describeStorageError(error) });
+    });
+    return true;
+  }
+
+  if (request.action === 'IMPORT_MEDIA_CHUNK') {
+    importMediaChunk(request.media || []).then(() => {
+      sendResponse({ success: true });
+    }).catch((error) => {
+      console.error('Error importing media chunk:', error);
+      sendResponse({ success: false, error: describeStorageError(error) });
+    });
+    return true;
+  }
+
+  if (request.action === 'IMPORT_FINALIZE') {
+    finalizeImport().then((result) => {
       updateExtensionTab();
       sendResponse({ success: true, ...result });
     }).catch((error) => {
-      console.error('Error importing data:', error);
-      sendResponse({ success: false, error: error.message });
+      console.error('Error finalizing import:', error);
+      sendResponse({ success: false, error: describeStorageError(error) });
     });
     return true;
   }
@@ -2429,6 +2513,33 @@ async function migrateThumbnailsToBlobs(posts) {
   if (entries.length > 0) {
     await storeMediaBatch(entries);
   }
+
+  // Posts that arrived without a thumbnail (download failed/skipped) may still
+  // have a blob from an earlier sync sitting in the media store -- relink it
+  // instead of leaving the tile blank or re-downloading.
+  const orphans = posts.filter((p) => p && p.id && !p.thumbnail && !p.thumbnailKey);
+  if (orphans.length > 0) {
+    try {
+      const db = await openDB();
+      await new Promise((resolve) => {
+        const tx = db.transaction([STORE_MEDIA], 'readonly');
+        const store = tx.objectStore(STORE_MEDIA);
+        let pending = orphans.length;
+        orphans.forEach((post) => {
+          const key = `thumb_${post.id}`;
+          const req = store.get(key);
+          req.onsuccess = () => {
+            if (req.result) post.thumbnailKey = key;
+            if (--pending === 0) resolve();
+          };
+          req.onerror = () => {
+            if (--pending === 0) resolve();
+          };
+        });
+      });
+      db.close();
+    } catch (e) { /* best-effort: posts still save without thumbnails */ }
+  }
 }
 
 // Read stored thumbnail blobs for a page of posts and attach them as data URLs.
@@ -2828,18 +2939,17 @@ async function clearAllPosts() {
 
 const BACKUP_FORMAT_VERSION = 1;
 
-// Bundle posts, collections, metadata, and media (thumbnails/videos) into a single
-// JSON-serializable snapshot. Blobs are inlined as data URLs so the whole backup
-// is one portable file.
-async function exportAllData() {
-  let db;
-  try {
-    db = await openDB();
+// ---- Chunked backup: export side -------------------------------------------
+// The viewer assembles the backup file from these pieces; nothing here returns
+// the whole library in one message.
 
-    const posts = await new Promise((resolve, reject) => {
+async function getExportManifest() {
+  const db = await openDB();
+  try {
+    const postsCount = await new Promise((resolve, reject) => {
       const tx = db.transaction([STORE_POSTS], 'readonly');
-      const request = tx.objectStore(STORE_POSTS).getAll();
-      request.onsuccess = () => resolve(request.result || []);
+      const request = tx.objectStore(STORE_POSTS).count();
+      request.onsuccess = () => resolve(request.result || 0);
       request.onerror = () => reject(request.error);
     });
 
@@ -2859,107 +2969,158 @@ async function exportAllData() {
       tx.onerror = () => reject(tx.error);
     });
 
-    const mediaEntries = await new Promise((resolve, reject) => {
+    const mediaKeys = await new Promise((resolve, reject) => {
       const tx = db.transaction([STORE_MEDIA], 'readonly');
-      const store = tx.objectStore(STORE_MEDIA);
-      const keysRequest = store.getAllKeys();
-      const valuesRequest = store.getAll();
-      tx.oncomplete = () => resolve(keysRequest.result.map((key, i) => ({ key, blob: valuesRequest.result[i] })));
-      tx.onerror = () => reject(tx.error);
+      const request = tx.objectStore(STORE_MEDIA).getAllKeys();
+      request.onsuccess = () => resolve(request.result || []);
+      request.onerror = () => reject(request.error);
     });
-
-    // Converting thousands of thumbnail blobs is the slow part of an export;
-    // stream progress so the button isn't frozen with no feedback.
-    const totalMedia = mediaEntries.length;
-    let doneMedia = 0;
-    let lastProgressAt = 0;
-    const media = await Promise.all(mediaEntries.map(async ({ key, blob }) => {
-      const dataUrl = await blobToDataUrl(blob);
-      doneMedia++;
-      const now = Date.now();
-      if (now - lastProgressAt > 300 || doneMedia === totalMedia) {
-        lastProgressAt = now;
-        safeBroadcast({ action: 'BACKUP_PROGRESS', phase: 'export', done: doneMedia, total: totalMedia });
-      }
-      return { key, dataUrl };
-    }));
 
     return {
       version: BACKUP_FORMAT_VERSION,
       exportedAt: new Date().toISOString(),
-      posts,
+      postsCount,
       collections,
       metadata,
-      media
+      mediaKeys
     };
   } finally {
-    if (db) db.close();
+    db.close();
   }
 }
 
-// Restore a snapshot produced by exportAllData(). Posts and media are upserted
-// by key (so importing into a non-empty library merges rather than duplicates);
-// collections and metadata are replaced wholesale.
-async function importAllData(data) {
-  if (!data || !Array.isArray(data.posts)) {
-    throw new Error('Invalid backup file');
-  }
-
-  let db;
+async function getPostsChunk(offset, limit) {
+  const db = await openDB();
   try {
-    db = await openDB();
-
-    const totalMedia = (data.media || []).length;
-    let doneMedia = 0;
-    let lastProgressAt = 0;
-    const mediaBlobs = await Promise.all((data.media || []).map(async ({ key, dataUrl }) => {
-      const blob = await dataUrlToBlob(dataUrl);
-      doneMedia++;
-      const now = Date.now();
-      if (now - lastProgressAt > 300 || doneMedia === totalMedia) {
-        lastProgressAt = now;
-        safeBroadcast({ action: 'BACKUP_PROGRESS', phase: 'import', done: doneMedia, total: totalMedia });
-      }
-      return { key, blob };
-    }));
-
-    await new Promise((resolve, reject) => {
-      const tx = db.transaction([STORE_POSTS, STORE_COLLECTIONS, STORE_METADATA, STORE_MEDIA], 'readwrite');
-
-      const postsStore = tx.objectStore(STORE_POSTS);
-      data.posts.forEach((post) => postsStore.put(post));
-
-      if (data.collections) {
-        tx.objectStore(STORE_COLLECTIONS).put(data.collections, 'all_collections');
-      }
-
-      const metaStore = tx.objectStore(STORE_METADATA);
-      (data.metadata || []).forEach(({ key, value }) => metaStore.put(value, key));
-
-      const mediaStore = tx.objectStore(STORE_MEDIA);
-      mediaBlobs.forEach(({ key, blob }) => mediaStore.put(blob, key));
-
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction([STORE_POSTS], 'readonly');
+      const posts = [];
+      let skipped = offset === 0;
+      const cursorRequest = tx.objectStore(STORE_POSTS).openCursor();
+      cursorRequest.onsuccess = () => {
+        const cursor = cursorRequest.result;
+        if (!cursor) {
+          resolve(posts);
+          return;
+        }
+        if (!skipped) {
+          skipped = true;
+          cursor.advance(offset);
+          return;
+        }
+        posts.push(cursor.value);
+        if (posts.length >= limit) {
+          resolve(posts);
+          return;
+        }
+        cursor.continue();
+      };
+      cursorRequest.onerror = () => reject(cursorRequest.error);
     });
-
-    const postsCount = await countPostsDirectly();
-
-    // countPostsDirectly() may reflect posts merged in from an existing library, so
-    // the imported metadata's posts_count (a snapshot from the source instance) is stale.
-    await new Promise((resolve, reject) => {
-      const tx = db.transaction([STORE_METADATA], 'readwrite');
-      tx.objectStore(STORE_METADATA).put(postsCount, 'posts_count');
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-    });
-
-    scheduleHashtagCacheRebuild(postsCount);
-
-    return { importedPosts: data.posts.length, totalPosts: postsCount };
   } finally {
-    if (db) db.close();
+    db.close();
   }
+}
+
+async function getMediaChunk(keys) {
+  if (!keys || keys.length === 0) return [];
+  const db = await openDB();
+  let entries;
+  try {
+    entries = await new Promise((resolve, reject) => {
+      const tx = db.transaction([STORE_MEDIA], 'readonly');
+      const store = tx.objectStore(STORE_MEDIA);
+      const found = [];
+      let pending = keys.length;
+      keys.forEach((key) => {
+        const request = store.get(key);
+        request.onsuccess = () => {
+          if (request.result) found.push({ key, blob: request.result });
+          if (--pending === 0) resolve(found);
+        };
+        request.onerror = () => reject(request.error);
+      });
+    });
+  } finally {
+    db.close();
+  }
+
+  return Promise.all(entries.map(async ({ key, blob }) => ({
+    key,
+    dataUrl: await blobToDataUrl(blob)
+  })));
+}
+
+// ---- Chunked backup: import side -------------------------------------------
+// Posts and media are upserted by key (importing into a non-empty library
+// merges rather than duplicates); collections and metadata are replaced.
+
+async function importCollectionsAndMetadata(collections, metadata) {
+  const db = await openDB();
+  try {
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction([STORE_COLLECTIONS, STORE_METADATA], 'readwrite');
+      if (collections) {
+        tx.objectStore(STORE_COLLECTIONS).put(collections, 'all_collections');
+      }
+      const metaStore = tx.objectStore(STORE_METADATA);
+      (metadata || []).forEach(({ key, value }) => metaStore.put(value, key));
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+
+async function importPostsChunk(posts) {
+  if (!Array.isArray(posts) || posts.length === 0) return;
+  const db = await openDB();
+  try {
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction([STORE_POSTS], 'readwrite');
+      const store = tx.objectStore(STORE_POSTS);
+      posts.forEach((post) => {
+        if (post && post.id) store.put(post);
+      });
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+
+async function importMediaChunk(media) {
+  if (!Array.isArray(media) || media.length === 0) return;
+  const blobs = await Promise.all(media.map(async ({ key, dataUrl }) => ({
+    key,
+    blob: await dataUrlToBlob(dataUrl)
+  })));
+
+  const db = await openDB();
+  try {
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction([STORE_MEDIA], 'readwrite');
+      const store = tx.objectStore(STORE_MEDIA);
+      blobs.forEach(({ key, blob }) => {
+        if (key && blob) store.put(blob, key);
+      });
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+
+async function finalizeImport() {
+  // The imported metadata's posts_count is a snapshot from the source instance
+  // and may be stale after merging into an existing library: recount.
+  const postsCount = await countPostsDirectly();
+  await setPostsCountMetadata(postsCount);
+  scheduleHashtagCacheRebuild(postsCount);
+  return { totalPosts: postsCount };
 }
 
 // Remove a single post (and its stored thumbnail) from the DB and keep the

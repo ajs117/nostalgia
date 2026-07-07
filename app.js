@@ -919,8 +919,6 @@ function setupMessageListener() {
       handleRebuildComplete();
     } else if (request.action === 'REBUILD_STOPPED') {
       handleRebuildComplete();
-    } else if (request.action === 'BACKUP_PROGRESS') {
-      handleBackupProgress(request.phase, request.done, request.total);
     }
     return true;
   });
@@ -2569,35 +2567,81 @@ function clearAllData() {
   });
 }
 
-function exportData() {
+// Promise wrapper that treats runtime errors and {success:false} uniformly.
+function sendBackupMessage(message) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(message, (response) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+      } else if (!response || !response.success) {
+        reject(new Error(response?.error || 'No response from background'));
+      } else {
+        resolve(response);
+      }
+    });
+  });
+}
+
+const EXPORT_POSTS_CHUNK_SIZE = 1000;
+const EXPORT_MEDIA_CHUNK_SIZE = 150;
+const IMPORT_POSTS_CHUNK_SIZE = 500;
+const IMPORT_MEDIA_CHUNK_SIZE = 150;
+
+// Export is assembled here from chunked background reads: a 25k-post library
+// as a single runtime message exceeded Chrome's message-size limits.
+async function exportData() {
   const btn = document.getElementById('export-data-btn');
   if (btn) {
     btn.disabled = true;
     btn.innerHTML = buildButtonMarkup(t('exporting'), getSpinnerIconMarkup(16));
   }
 
-  chrome.runtime.sendMessage({ action: 'EXPORT_DATA' }, (response) => {
-    if (response && response.success) {
-      const json = JSON.stringify(response.data);
-      const blob = new Blob([json], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const date = new Date().toISOString().slice(0, 10);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `nostalgia-backup-${date}.json`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    } else {
-      alert(response?.error || t('exportFailed'));
+  try {
+    const manifest = await sendBackupMessage({ action: 'EXPORT_MANIFEST' });
+
+    const posts = [];
+    for (let offset = 0; offset < manifest.postsCount; offset += EXPORT_POSTS_CHUNK_SIZE) {
+      const chunk = await sendBackupMessage({ action: 'EXPORT_POSTS_CHUNK', offset, limit: EXPORT_POSTS_CHUNK_SIZE });
+      posts.push(...(chunk.posts || []));
     }
 
-    if (btn) {
-      btn.disabled = false;
-      btn.innerHTML = buildButtonMarkup(t('exportData'), getExportIconMarkup());
+    const media = [];
+    const mediaKeys = manifest.mediaKeys || [];
+    for (let i = 0; i < mediaKeys.length; i += EXPORT_MEDIA_CHUNK_SIZE) {
+      const keys = mediaKeys.slice(i, i + EXPORT_MEDIA_CHUNK_SIZE);
+      const chunk = await sendBackupMessage({ action: 'EXPORT_MEDIA_CHUNK', keys });
+      media.push(...(chunk.media || []));
+      handleBackupProgress('export', Math.min(i + EXPORT_MEDIA_CHUNK_SIZE, mediaKeys.length), mediaKeys.length);
     }
-  });
+
+    const data = {
+      version: manifest.version,
+      exportedAt: manifest.exportedAt,
+      posts,
+      collections: manifest.collections,
+      metadata: manifest.metadata,
+      media
+    };
+
+    const json = JSON.stringify(data);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const date = new Date().toISOString().slice(0, 10);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `nostalgia-backup-${date}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    alert(error.message || t('exportFailed'));
+  }
+
+  if (btn) {
+    btn.disabled = false;
+    btn.innerHTML = buildButtonMarkup(t('exportData'), getExportIconMarkup());
+  }
 }
 
 function importData(file) {
@@ -2619,7 +2663,7 @@ function importData(file) {
   };
 
   const reader = new FileReader();
-  reader.onload = () => {
+  reader.onload = async () => {
     let data;
     try {
       data = JSON.parse(reader.result);
@@ -2629,17 +2673,37 @@ function importData(file) {
       return;
     }
 
-    chrome.runtime.sendMessage({ action: 'IMPORT_DATA', data }, (response) => {
-      if (response && response.success) {
-        allHashtagsCache = [];
-        loadPosts();
-        alert(t('importSuccess', { count: response.importedPosts }));
-        closeSettingsModal();
-      } else {
-        alert(response?.error || t('importFailed'));
-      }
+    if (!data || !Array.isArray(data.posts)) {
+      alert(t('importInvalidFile'));
       restoreBtn();
-    });
+      return;
+    }
+
+    // Chunked restore: collections/metadata first, then posts and media in
+    // slices, then a finalize pass that recounts and rebuilds caches.
+    try {
+      await sendBackupMessage({ action: 'IMPORT_BEGIN', collections: data.collections, metadata: data.metadata });
+
+      for (let i = 0; i < data.posts.length; i += IMPORT_POSTS_CHUNK_SIZE) {
+        await sendBackupMessage({ action: 'IMPORT_POSTS_CHUNK', posts: data.posts.slice(i, i + IMPORT_POSTS_CHUNK_SIZE) });
+      }
+
+      const media = data.media || [];
+      for (let i = 0; i < media.length; i += IMPORT_MEDIA_CHUNK_SIZE) {
+        await sendBackupMessage({ action: 'IMPORT_MEDIA_CHUNK', media: media.slice(i, i + IMPORT_MEDIA_CHUNK_SIZE) });
+        handleBackupProgress('import', Math.min(i + IMPORT_MEDIA_CHUNK_SIZE, media.length), media.length);
+      }
+
+      await sendBackupMessage({ action: 'IMPORT_FINALIZE' });
+
+      allHashtagsCache = [];
+      loadPosts();
+      alert(t('importSuccess', { count: data.posts.length }));
+      closeSettingsModal();
+    } catch (error) {
+      alert(error.message || t('importFailed'));
+    }
+    restoreBtn();
   };
   reader.onerror = () => {
     alert(t('importInvalidFile'));
