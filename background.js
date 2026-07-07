@@ -14,6 +14,40 @@ let videoApiTabId = null;
 // Mutex for preventing race conditions in batch saves
 let batchSaveLock = Promise.resolve();
 
+// MV3 kills the service worker after ~30s idle -- easily hit while a sync sits
+// in a rate-limit backoff. In-memory sync state must survive that restart or
+// the worker wakes up amnesiac: the concurrent-sync guard fails, GET_SYNC_STATE
+// answers wrong, and the sync tab leaks. Persist to storage.session (cleared on
+// browser exit, which matches the state's real lifetime) and rehydrate on boot.
+const SYNC_STATE_SESSION_KEY = 'nostalgia_sw_sync_state';
+
+function persistSyncState() {
+  try {
+    chrome.storage.session.set({
+      [SYNC_STATE_SESSION_KEY]: { syncInProgress, activeInstagramTabId }
+    });
+  } catch (e) { /* storage.session unavailable: state stays in-memory only */ }
+}
+
+try {
+  chrome.storage.session.get([SYNC_STATE_SESSION_KEY], (result) => {
+    const saved = result && result[SYNC_STATE_SESSION_KEY];
+    if (!saved || syncInProgress) return;
+    const tabId = saved.activeInstagramTabId;
+    if (!tabId) return;
+    // Validate against reality: the tab may have been closed while the worker
+    // was asleep (onRemoved never fired for a dead worker).
+    chrome.tabs.get(tabId, (tab) => {
+      if (!chrome.runtime.lastError && tab) {
+        activeInstagramTabId = tabId;
+        syncInProgress = !!saved.syncInProgress;
+      } else {
+        persistSyncState();
+      }
+    });
+  });
+} catch (e) { /* ignore */ }
+
 chrome.action.onClicked.addListener(() => {
   chrome.tabs.create({ url: chrome.runtime.getURL('index.html') }, (newTab) => {
     extensionTabId = newTab.id;
@@ -29,6 +63,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     // The sync runs in this tab; if it's gone, the sync is no longer running.
     // Clear the flag so a future sync isn't permanently blocked.
     syncInProgress = false;
+    persistSyncState();
   }
   if (tabId === videoApiTabId) {
     videoApiTabId = null;
@@ -606,6 +641,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     syncInProgress = true;
     chrome.tabs.create({ url: 'https://www.instagram.com/' }, (tab) => {
       activeInstagramTabId = tab.id;
+      persistSyncState();
       chrome.tabs.onUpdated.addListener(function listener(tabId, info) {
         if (tabId === tab.id && info.status === 'complete') {
           safeSendToTab(tabId, { action: 'SHOW_SYNC_DRAWER' });
@@ -630,6 +666,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     syncInProgress = true;
     chrome.tabs.create({ url: 'https://www.instagram.com/', active: false }, (tab) => {
       activeInstagramTabId = tab.id;
+      persistSyncState();
 
       chrome.tabs.onUpdated.addListener(function listener(tabId, info) {
         if (tabId === tab.id && info.status === 'complete') {
@@ -778,6 +815,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   if (request.action === 'SYNC_FINISHED') {
     syncInProgress = false;
+    persistSyncState();
     cancelPendingSyncProgressBroadcast();
     const completeMsg = {
       action: 'SYNC_COMPLETE',
@@ -814,6 +852,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   if (request.action === 'IMPORT_FAILED') {
     syncInProgress = false;
+    persistSyncState();
     cancelPendingSyncProgressBroadcast();
     safeBroadcast({ action: 'IMPORT_FAILED', error: request.error });
     if (activeInstagramTabId) {
@@ -834,6 +873,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   if (request.action === 'SYNC_LOGIN_REQUIRED') {
     syncInProgress = false;
+    persistSyncState();
     safeBroadcast({ action: 'SYNC_LOGIN_REQUIRED', error: request.error });
 
     if (activeInstagramTabId) {
@@ -856,6 +896,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   if (request.action === 'SYNC_STOPPED') {
     syncInProgress = false;
+    persistSyncState();
     cancelPendingSyncProgressBroadcast();
     const stoppedMsg = {
       action: 'SYNC_STOPPED',
