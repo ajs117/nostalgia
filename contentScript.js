@@ -960,18 +960,31 @@ function saveSyncCursor(state) {
 }
 
 // Resolve when sync is stopped or after `ms`, whichever comes first.
+// Event-driven: STOP_SYNC calls notifySyncStopped() which releases every
+// pending delay immediately (no 100ms polling).
+const syncStopWaiters = [];
+
+function notifySyncStopped() {
+  syncStopWaiters.splice(0).forEach((release) => release());
+}
+
 function syncDelay(ms) {
   return new Promise((resolve) => {
-    const checkInterval = setInterval(() => {
-      if (!isSyncing) {
-        clearInterval(checkInterval);
-        resolve();
-      }
-    }, 100);
-    setTimeout(() => {
-      clearInterval(checkInterval);
+    if (!isSyncing) {
       resolve();
-    }, ms);
+      return;
+    }
+
+    let timer = null;
+    const release = () => {
+      if (timer) clearTimeout(timer);
+      const index = syncStopWaiters.indexOf(release);
+      if (index !== -1) syncStopWaiters.splice(index, 1);
+      resolve();
+    };
+
+    syncStopWaiters.push(release);
+    timer = setTimeout(release, ms);
   });
 }
 
@@ -1427,6 +1440,14 @@ async function getInstagramSavedPosts() {
     const userStopped = !isSyncing;
     const completed = !userStopped && cursorState.backfillComplete === true;
 
+    // The feed has been fully walked: the real total is what we actually
+    // processed. Instagram's estimate over-counts (deleted/private posts), so
+    // replace it -- this lets the progress bar reach 100% honestly instead of
+    // stalling at the estimate-derived percentage.
+    if (completed) {
+      totalSavedCount = syncedCount + failedCount;
+    }
+
     // Always persist cursor + counters so a stop/restart resumes cleanly.
     await saveSyncCursor(cursorState);
     await saveProgress('', '', syncedCount, failedCount, totalSavedCount);
@@ -1787,6 +1808,7 @@ async function handleContentScriptSyncMessage(request) {
     }
   } else if (request.action === 'STOP_SYNC') {
     isSyncing = false;
+    notifySyncStopped();
 
     const drawer = document.getElementById('instagram-sync-drawer');
     if (drawer) {

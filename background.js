@@ -2827,10 +2827,21 @@ async function exportAllData() {
       tx.onerror = () => reject(tx.error);
     });
 
-    const media = await Promise.all(mediaEntries.map(async ({ key, blob }) => ({
-      key,
-      dataUrl: await blobToDataUrl(blob)
-    })));
+    // Converting thousands of thumbnail blobs is the slow part of an export;
+    // stream progress so the button isn't frozen with no feedback.
+    const totalMedia = mediaEntries.length;
+    let doneMedia = 0;
+    let lastProgressAt = 0;
+    const media = await Promise.all(mediaEntries.map(async ({ key, blob }) => {
+      const dataUrl = await blobToDataUrl(blob);
+      doneMedia++;
+      const now = Date.now();
+      if (now - lastProgressAt > 300 || doneMedia === totalMedia) {
+        lastProgressAt = now;
+        safeBroadcast({ action: 'BACKUP_PROGRESS', phase: 'export', done: doneMedia, total: totalMedia });
+      }
+      return { key, dataUrl };
+    }));
 
     return {
       version: BACKUP_FORMAT_VERSION,
@@ -2857,10 +2868,19 @@ async function importAllData(data) {
   try {
     db = await openDB();
 
-    const mediaBlobs = await Promise.all((data.media || []).map(async ({ key, dataUrl }) => ({
-      key,
-      blob: await dataUrlToBlob(dataUrl)
-    })));
+    const totalMedia = (data.media || []).length;
+    let doneMedia = 0;
+    let lastProgressAt = 0;
+    const mediaBlobs = await Promise.all((data.media || []).map(async ({ key, dataUrl }) => {
+      const blob = await dataUrlToBlob(dataUrl);
+      doneMedia++;
+      const now = Date.now();
+      if (now - lastProgressAt > 300 || doneMedia === totalMedia) {
+        lastProgressAt = now;
+        safeBroadcast({ action: 'BACKUP_PROGRESS', phase: 'import', done: doneMedia, total: totalMedia });
+      }
+      return { key, blob };
+    }));
 
     await new Promise((resolve, reject) => {
       const tx = db.transaction([STORE_POSTS, STORE_COLLECTIONS, STORE_METADATA, STORE_MEDIA], 'readwrite');

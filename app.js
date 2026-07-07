@@ -919,9 +919,21 @@ function setupMessageListener() {
       handleRebuildComplete();
     } else if (request.action === 'REBUILD_STOPPED') {
       handleRebuildComplete();
+    } else if (request.action === 'BACKUP_PROGRESS') {
+      handleBackupProgress(request.phase, request.done, request.total);
     }
     return true;
   });
+}
+
+// Live percentage on the Export/Import buttons -- large libraries take a while
+// and a frozen button reads as a hang.
+function handleBackupProgress(phase, done, total) {
+  const btn = document.getElementById(phase === 'export' ? 'export-data-btn' : 'import-data-btn');
+  if (!btn || !btn.disabled || !(total > 0)) return;
+  const percent = Math.min(100, Math.round((done / total) * 100));
+  const label = phase === 'export' ? t('exporting') : t('importing');
+  btn.innerHTML = buildButtonMarkup(`${label} ${percent}%`, getSpinnerIconMarkup(16));
 }
 
 // Debounced grid refresh while a sync/rebuild streams posts in. One reload at
@@ -2682,6 +2694,15 @@ function handleSyncStarted() {
   restoreSyncingState();
   document.getElementById('sync-progress-bar').style.width = '10%';
   updateLocalizedSyncStatus('syncing', 'preparing');
+
+  // Paint the last persisted counters immediately instead of showing zeros
+  // until the next progress broadcast arrives.
+  chrome.storage.local.get(['instagram_sync_progress'], (result) => {
+    const progress = result.instagram_sync_progress;
+    if (progress && isSyncing) {
+      updateSyncPanelProgress(progress.synced, progress.failed, progress.total);
+    }
+  });
 }
 
 // While syncing, the TOTAL tile shows Instagram's reported count, which is only
