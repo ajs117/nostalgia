@@ -21,6 +21,10 @@ let modalGeneration = 0;
 // Timer that advances image posts during autoplay (videos advance on 'ended').
 let autoplayImageTimer = null;
 const AUTOPLAY_IMAGE_DURATION_MS = 3000;
+// Posts already shown this modal session. While a sync is reordering the
+// library, page contents shift underneath the modal and pure index-based
+// advancing replays posts; skipping seen ids keeps autoplay moving forward.
+const autoplaySeenPostIds = new Set();
 // Hidden <video> that pre-buffers the next clip's bytes while the current one
 // plays, so advancing is instant. Only one is kept alive at a time.
 let preloadBufferVideo = null;
@@ -49,6 +53,7 @@ const AUTOPLAY_STORAGE_KEY = 'nostalgia_autoplay';
 const LOOP_STORAGE_KEY = 'nostalgia_loop';
 const AUTOSYNC_STORAGE_KEY = 'nostalgia_autosync';
 let currentAutoSyncEnabled = false;
+const PAGE_SIZE_STORAGE_KEY = 'nostalgia_page_size';
 
 function getI18nApi() {
   /** @type {NostalgiaI18nApi} */
@@ -426,6 +431,17 @@ function initializePreferences() {
       localStorage.setItem(AUTOSYNC_STORAGE_KEY, currentAutoSyncEnabled ? 'true' : 'false');
     });
   }
+
+  const pageSizeSelect = document.getElementById('page-size-select');
+  if (pageSizeSelect) {
+    pageSizeSelect.value = localStorage.getItem(PAGE_SIZE_STORAGE_KEY) || 'auto';
+    pageSizeSelect.addEventListener('change', (event) => {
+      localStorage.setItem(PAGE_SIZE_STORAGE_KEY, event.target.value);
+      postsPerPage = resolvePostsPerPage();
+      currentPage = 1;
+      loadPosts();
+    });
+  }
 }
 
 // On load, ask the background whether a sync is already running (the page may
@@ -647,9 +663,18 @@ function calculatePostsPerPage() {
   return cols * rows;
 }
 
+// Effective page size: the user's fixed choice from Settings, or the
+// responsive per-viewport calculation when set to "auto".
+function resolvePostsPerPage() {
+  const saved = localStorage.getItem(PAGE_SIZE_STORAGE_KEY);
+  const fixed = parseInt(saved, 10);
+  if (Number.isFinite(fixed) && fixed > 0) return fixed;
+  return calculatePostsPerPage();
+}
+
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
-  postsPerPage = calculatePostsPerPage();
+  postsPerPage = resolvePostsPerPage();
   initializePreferences();
   initializeEventListeners();
   updateRandomControlsVisibility();
@@ -664,12 +689,12 @@ document.addEventListener('DOMContentLoaded', () => {
   // The status will be updated if there's an active sync via messages
   updateSyncStatus('', '');
 
-  // Recalculate on resize
+  // Recalculate on resize (only in "auto" page-size mode; a fixed size stays)
   let resizeTimeout;
   window.addEventListener('resize', () => {
     clearTimeout(resizeTimeout);
     resizeTimeout = setTimeout(() => {
-      const newPostsPerPage = calculatePostsPerPage();
+      const newPostsPerPage = resolvePostsPerPage();
       if (newPostsPerPage !== postsPerPage) {
         postsPerPage = newPostsPerPage;
         loadPosts();
@@ -1797,19 +1822,35 @@ function scheduleAutoplayCarouselImageAdvance(post, idx) {
   }, AUTOPLAY_IMAGE_DURATION_MS);
 }
 
+// First index at or after `startIndex` whose post hasn't been shown this
+// session (see autoplaySeenPostIds), or -1.
+function findNextUnseenIndex(startIndex) {
+  for (let i = Math.max(0, startIndex); i < displayedPosts.length; i++) {
+    const post = displayedPosts[i];
+    if (post && !autoplaySeenPostIds.has(post.id)) return i;
+  }
+  return -1;
+}
+
 // Advance the modal to the next post. Rolls onto the next page automatically
 // when the current page is exhausted, so autoplay/skip keep going instead of
-// stopping at the end of a page.
+// stopping at the end of a page. Posts already shown this session are skipped:
+// during a sync the ordering shifts underneath the pagination, and without the
+// skip the same videos come around again.
 function advanceModalToNext() {
   if (currentModalIndex < 0) return;
   clearAutoplayImageTimer();
 
-  const nextIndex = currentModalIndex + 1;
-  if (nextIndex < displayedPosts.length) {
+  const nextIndex = findNextUnseenIndex(currentModalIndex + 1);
+  if (nextIndex >= 0) {
     openModal(nextIndex);
     return;
   }
 
+  rollModalToNextPage();
+}
+
+function rollModalToNextPage() {
   const totalPages = Math.max(1, Math.ceil(totalPosts / postsPerPage));
   if (currentPage >= totalPages) return; // genuinely the last post
 
@@ -1818,9 +1859,13 @@ function advanceModalToNext() {
   loadPosts(false, false, () => {
     // Bail if the user closed or navigated the modal while the page loaded.
     if (gen !== modalGeneration) return;
-    if (displayedPosts.length > 0) {
+    const idx = findNextUnseenIndex(0);
+    if (idx >= 0) {
       window.scrollTo({ top: 0 });
-      openModal(0);
+      openModal(idx);
+    } else {
+      // Whole page already seen (order shifted mid-sync): keep rolling.
+      rollModalToNextPage();
     }
   });
 }
@@ -1833,6 +1878,12 @@ function openModal(index, carouselIdx = 0) {
   // were just on, and cancel a pending image-autoplay advance.
   modalGeneration++;
   clearAutoplayImageTimer();
+
+  // A fresh viewing session (opened from the grid, not navigation within the
+  // modal) resets the seen-set used to de-duplicate autoplay while syncing.
+  if (currentModalIndex === -1) {
+    autoplaySeenPostIds.clear();
+  }
 
   const modal = document.getElementById('modal');
   const mediaContainer = document.getElementById('modal-media');
@@ -1853,6 +1904,8 @@ function openModal(index, carouselIdx = 0) {
   const post = displayedPosts[index];
 
   if (!post) return;
+
+  if (post.id) autoplaySeenPostIds.add(post.id);
 
   const titleEl = document.getElementById('modal-title');
   const captionEl = document.getElementById('modal-caption');

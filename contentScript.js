@@ -713,7 +713,7 @@ async function ensureNostalgiaCollection() {
     return { collection: existingCollection, collections };
   }
 
-  const created = await instagramApiRequest('https://i.instagram.com/api/v1/collections/create/', {
+  const created = await instagramApiRequest('https://www.instagram.com/api/v1/collections/create/', {
     method: 'POST',
     headers: {
       'content-type': 'application/x-www-form-urlencoded; charset=UTF-8'
@@ -733,7 +733,7 @@ async function ensureNostalgiaCollection() {
 }
 
 async function addPostToCollection(post, collectionId) {
-  return instagramApiRequest(`https://i.instagram.com/api/v1/media/${post.id}/save/`, {
+  return instagramApiRequest(`https://www.instagram.com/api/v1/media/${post.id}/save/`, {
     method: 'POST',
     headers: {
       'content-type': 'application/x-www-form-urlencoded; charset=UTF-8'
@@ -1915,11 +1915,11 @@ async function bumpPostOnInstagram(post) {
   }).toString();
   const headers = { 'content-type': 'application/x-www-form-urlencoded; charset=UTF-8' };
 
-  await instagramApiRequest(`https://i.instagram.com/api/v1/media/${post.id}/unsave/`, {
+  await instagramApiRequest(`https://www.instagram.com/api/v1/media/${post.id}/unsave/`, {
     method: 'POST', headers, body, redirect: 'error'
   });
   await new Promise((resolve) => setTimeout(resolve, 500));
-  await instagramApiRequest(`https://i.instagram.com/api/v1/media/${post.id}/save/`, {
+  await instagramApiRequest(`https://www.instagram.com/api/v1/media/${post.id}/save/`, {
     method: 'POST', headers, body, redirect: 'error'
   });
 
