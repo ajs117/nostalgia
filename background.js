@@ -312,45 +312,70 @@ function waitForTabToComplete(tabId) {
   });
 }
 
+// True if the tab answers a CS_PING -- i.e. it runs a CURRENT content script.
+// Tabs opened before an extension update/reload run stale scripts whose
+// extension context is invalidated; dispatching bump/collection work to them
+// fails opaquely ("Failed to fetch" / no response).
+function contentScriptAlive(tabId) {
+  return new Promise((resolve) => {
+    try {
+      chrome.tabs.sendMessage(tabId, { action: 'CS_PING' }, (response) => {
+        if (chrome.runtime.lastError || !response || !response.pong) {
+          resolve(false);
+        } else {
+          resolve(true);
+        }
+      });
+    } catch (e) {
+      resolve(false);
+    }
+  });
+}
+
+function createInstagramActionTab(resolve, reject) {
+  chrome.tabs.create({ url: 'https://www.instagram.com/', active: false }, (newTab) => {
+    if (chrome.runtime.lastError || !newTab) {
+      reject(new Error(chrome.runtime.lastError?.message || 'Failed to open Instagram tab'));
+      return;
+    }
+
+    activeInstagramTabId = newTab.id;
+    persistSyncState();
+    waitForTabToComplete(newTab.id).then(resolve).catch(reject);
+  });
+}
+
 function ensureInstagramTabForAction() {
   return new Promise((resolve, reject) => {
+    const tryTab = async (tabId, onUnusable) => {
+      if (await contentScriptAlive(tabId)) {
+        resolve(tabId);
+      } else {
+        onUnusable();
+      }
+    };
+
     if (activeInstagramTabId !== null) {
       chrome.tabs.get(activeInstagramTabId, (tab) => {
         if (!chrome.runtime.lastError && tab) {
-          resolve(activeInstagramTabId);
+          tryTab(activeInstagramTabId, () => createInstagramActionTab(resolve, reject));
           return;
         }
 
         activeInstagramTabId = null;
-        chrome.tabs.create({ url: 'https://www.instagram.com/', active: false }, (newTab) => {
-          if (chrome.runtime.lastError || !newTab) {
-            reject(new Error(chrome.runtime.lastError?.message || 'Failed to open Instagram tab'));
-            return;
-          }
-
-          activeInstagramTabId = newTab.id;
-          waitForTabToComplete(newTab.id).then(resolve).catch(reject);
-        });
+        createInstagramActionTab(resolve, reject);
       });
       return;
     }
 
     chrome.tabs.query({ url: 'https://www.instagram.com/*' }, (tabs) => {
       if (tabs && tabs.length > 0) {
-        activeInstagramTabId = tabs[0].id;
-        resolve(activeInstagramTabId);
+        const candidate = tabs[0].id;
+        tryTab(candidate, () => createInstagramActionTab(resolve, reject));
         return;
       }
 
-      chrome.tabs.create({ url: 'https://www.instagram.com/', active: false }, (newTab) => {
-        if (chrome.runtime.lastError || !newTab) {
-          reject(new Error(chrome.runtime.lastError?.message || 'Failed to open Instagram tab'));
-          return;
-        }
-
-        activeInstagramTabId = newTab.id;
-        waitForTabToComplete(newTab.id).then(resolve).catch(reject);
-      });
+      createInstagramActionTab(resolve, reject);
     });
   });
 }

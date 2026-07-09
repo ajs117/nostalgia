@@ -732,18 +732,44 @@ async function ensureNostalgiaCollection() {
   };
 }
 
+// Instagram media ids come as "<pk>_<userPk>"; the web save endpoints want the
+// bare pk.
+function extractMediaPk(mediaId) {
+  return String(mediaId || '').split('_')[0];
+}
+
+// POST to Instagram's save/unsave endpoints. Primary path is the `web/save`
+// namespace that instagram.com's own client calls from this same origin (takes
+// the bare pk); falls back to the `media/` namespace with the full id for
+// accounts/sessions where the web route isn't available. Throws the LAST
+// error with endpoint context so failures are actually diagnosable.
+async function postSaveAction(mediaId, action, params = {}) {
+  const headers = { 'content-type': 'application/x-www-form-urlencoded; charset=UTF-8' };
+  const body = new URLSearchParams({
+    radio_type: 'wifi-none',
+    module_name: 'nostalgia_extension',
+    ...params
+  }).toString();
+
+  const attempts = [
+    `https://www.instagram.com/api/v1/web/save/${extractMediaPk(mediaId)}/${action}/`,
+    `https://www.instagram.com/api/v1/media/${mediaId}/${action}/`
+  ];
+
+  let lastError = null;
+  for (const url of attempts) {
+    try {
+      return await instagramApiRequest(url, { method: 'POST', headers, body, redirect: 'error' });
+    } catch (error) {
+      lastError = new Error(`${action} failed (${url.includes('/web/') ? 'web' : 'media'} endpoint): ${error.message}`);
+    }
+  }
+  throw lastError;
+}
+
 async function addPostToCollection(post, collectionId) {
-  return instagramApiRequest(`https://www.instagram.com/api/v1/media/${post.id}/save/`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/x-www-form-urlencoded; charset=UTF-8'
-    },
-    body: new URLSearchParams({
-      added_collection_ids: JSON.stringify([String(collectionId)]),
-      radio_type: 'wifi-none',
-      module_name: 'nostalgia_extension'
-    }).toString(),
-    redirect: 'error'
+  return postSaveAction(post.id, 'save', {
+    added_collection_ids: JSON.stringify([String(collectionId)])
   });
 }
 
@@ -1821,6 +1847,14 @@ async function handleContentScriptSyncMessage(request) {
 }
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === 'CS_PING') {
+    // Liveness probe: lets the background verify this tab runs a CURRENT
+    // content script before dispatching work to it (tabs opened before an
+    // extension update run stale scripts that can't respond).
+    sendResponse({ pong: true });
+    return false;
+  }
+
   if (request.action === 'ADD_POST_TO_NOSTALGIA_COLLECTION') {
     addPostToNostalgiaCollection(request.post)
       .then((response) => sendResponse(response))
@@ -1909,19 +1943,9 @@ async function bumpPostOnInstagram(post) {
     throw new Error('Post metadata is incomplete');
   }
 
-  const body = new URLSearchParams({
-    radio_type: 'wifi-none',
-    module_name: 'nostalgia_extension'
-  }).toString();
-  const headers = { 'content-type': 'application/x-www-form-urlencoded; charset=UTF-8' };
-
-  await instagramApiRequest(`https://www.instagram.com/api/v1/media/${post.id}/unsave/`, {
-    method: 'POST', headers, body, redirect: 'error'
-  });
+  await postSaveAction(post.id, 'unsave');
   await new Promise((resolve) => setTimeout(resolve, 500));
-  await instagramApiRequest(`https://www.instagram.com/api/v1/media/${post.id}/save/`, {
-    method: 'POST', headers, body, redirect: 'error'
-  });
+  await postSaveAction(post.id, 'save');
 
   return { success: true };
 }

@@ -598,8 +598,15 @@ function createVideoElement(src) {
   video.loop = currentLoopEnabled;
 
   video.onerror = () => {
+    // Cleanup paths (closing the modal / advancing) empty the src, which also
+    // fires 'error'. Those aren't playback failures: ignore them, otherwise the
+    // console fills with spurious errors and a healthy player gets replaced
+    // with an error message.
+    if (!video.getAttribute('src')) return;
     console.error('Video playback error:', src);
-    video.parentElement.innerHTML = `<div class="media-error">${t('failedToLoadVideo')}</div>`;
+    if (video.parentElement) {
+      video.parentElement.innerHTML = `<div class="media-error">${t('failedToLoadVideo')}</div>`;
+    }
   };
   return video;
 }
