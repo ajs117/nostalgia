@@ -1,6 +1,6 @@
 {
   "name": "nostalgia",
-  "version": "2.3.8",
+  "version": "2.4.0",
   "description": "nostalgia - Your Instagram saved posts viewer",
   "scripts": {
     "build": "node build.js",
