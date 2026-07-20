@@ -1050,6 +1050,19 @@ select:hover {
   padding: 0 8px;
 }
 
+/* Infinite scroll (random mode) */
+.infinite-scroll-loader {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 0;
+}
+
+#infinite-scroll-sentinel {
+  width: 100%;
+  height: 1px;
+}
+
 /* Jump-to-page control */
 .pagination-jump {
   display: flex;
@@ -1201,6 +1214,8 @@ select:hover {
 }
 
 .modal-image {
+  height: 100vh;
+  width: auto;
   max-width: 100%;
   max-height: 100vh;
   object-fit: contain;
@@ -1777,6 +1792,12 @@ select:hover {
 
   .modal-video.landscape {
     width: 100%;
+    max-width: 100%;
+  }
+
+  .modal-image {
+    height: 55vh;
+    max-height: 55vh;
     max-width: 100%;
   }
 }

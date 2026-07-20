@@ -6,6 +6,11 @@ let displayedPosts = [];
 let currentPage = 1;
 let postsPerPage = 20; // Will be adjusted for complete rows
 let currentSort = 'newest-saved';
+// Infinite scroll (random mode only): appends pages as the sentinel nears the
+// viewport instead of showing pagination controls.
+let isLoadingMore = false;
+let gridLoadInFlight = false;
+let infiniteScrollObserver = null;
 let currentTypeFilter = 'all';
 let currentHashtagFilter = null;
 let currentSearchQuery = '';
@@ -690,6 +695,7 @@ document.addEventListener('DOMContentLoaded', () => {
   setupMobileFilters();
   setupSyncPanel();
   setupSettingsModal();
+  setupInfiniteScroll();
   adoptRunningSyncThenMaybeAutoStart();
 
   // Clear any stale sync status on fresh page load
@@ -812,6 +818,7 @@ function setupMobileFilters() {
 // Load posts with pagination from background
 function loadPosts(append = false, fetchHashtagsAfter = false, onComplete = null) {
   const requestId = ++latestLoadRequestId;
+  gridLoadInFlight = true;
   showLoadingState();
 
   chrome.runtime.sendMessage({
@@ -827,6 +834,11 @@ function loadPosts(append = false, fetchHashtagsAfter = false, onComplete = null
     if (requestId !== latestLoadRequestId) {
       return;
     }
+
+    // Latest load settled: clear the in-flight guards (a superseded load never
+    // reaches here, so a fresh reshuffle/sort correctly resets these).
+    gridLoadInFlight = false;
+    isLoadingMore = false;
 
     hideLoadingState();
 
@@ -845,8 +857,9 @@ function loadPosts(append = false, fetchHashtagsAfter = false, onComplete = null
       totalPosts = response.total || 0;
 
       // Apply local filters (like hashtag) after loading
-      applyLocalFilters();
+      applyLocalFilters(append);
       renderPagination();
+      updateInfiniteScroll();
 
       // Fetch hashtags after posts are loaded (service worker is ready)
       if (fetchHashtagsAfter) {
@@ -1079,11 +1092,11 @@ function handleHashtagClick(hashtag) {
 }
 
 // Apply local filters (all filtering now done server-side in background.js)
-function applyLocalFilters() {
+function applyLocalFilters(append = false) {
   // All filtering (type, search, hashtag) is now done at the database level
   // This function just sets up the display arrays
   displayedPosts = allPosts;
-  renderPosts();
+  renderPosts(append);
   updateStats();
 }
 
@@ -1187,9 +1200,62 @@ function updateHashtagChips() {
   });
 }
 
+// Random mode uses infinite scroll instead of paged navigation.
+function isInfiniteScrollMode() {
+  return currentSort === 'random';
+}
+
+function hasMorePages() {
+  const totalPages = Math.max(1, Math.ceil(totalPosts / postsPerPage));
+  return currentPage < totalPages;
+}
+
+function setupInfiniteScroll() {
+  const sentinel = document.getElementById('infinite-scroll-sentinel');
+  if (!sentinel || infiniteScrollObserver || typeof IntersectionObserver === 'undefined') return;
+  infiniteScrollObserver = new IntersectionObserver((entries) => {
+    if (entries.some((e) => e.isIntersecting)) loadMorePosts();
+  }, { rootMargin: '800px 0px' });
+  infiniteScrollObserver.observe(sentinel);
+}
+
+function updateInfiniteScroll() {
+  const loader = document.getElementById('infinite-scroll-loader');
+  if (!loader) return;
+  const active = isInfiniteScrollMode() && hasMorePages();
+  if (!active) loader.style.display = 'none';
+}
+
+function loadMorePosts() {
+  if (!isInfiniteScrollMode() || isLoadingMore || gridLoadInFlight ||
+      !hasMorePages() || isSyncing || isRebuilding) return;
+  isLoadingMore = true;
+  const loader = document.getElementById('infinite-scroll-loader');
+  if (loader) loader.style.display = 'flex';
+
+  currentPage++;
+  loadPosts(true, false, () => {
+    updateInfiniteScroll();
+    // Keep filling while the sentinel is still near the viewport (short first
+    // pages, or a tall window that a single page can't fill).
+    const sentinel = document.getElementById('infinite-scroll-sentinel');
+    if (sentinel && isInfiniteScrollMode() && hasMorePages()) {
+      const rect = sentinel.getBoundingClientRect();
+      if (rect.top < window.innerHeight + 800) loadMorePosts();
+    }
+  });
+}
+
 // Render pagination controls
 function renderPagination() {
   const container = document.getElementById('pagination');
+
+  // Random mode: no paged controls, infinite scroll takes over.
+  if (isInfiniteScrollMode()) {
+    container.innerHTML = '';
+    return;
+  }
+
   const totalPages = Math.max(1, Math.ceil(totalPosts / postsPerPage));
 
   if (totalPages <= 1) {
@@ -1334,8 +1400,20 @@ function renderPagination() {
 }
 
 // Render posts
-function renderPosts() {
+function renderPosts(append = false) {
   const container = document.getElementById('posts-container');
+
+  // Infinite-scroll append: only add the newly-loaded tail so scroll position
+  // is preserved and existing cards aren't rebuilt.
+  if (append) {
+    const already = container.querySelectorAll('.post-card').length;
+    const fragment = document.createDocumentFragment();
+    for (let i = already; i < displayedPosts.length; i++) {
+      fragment.appendChild(createPostCard(displayedPosts[i], i));
+    }
+    container.appendChild(fragment);
+    return;
+  }
 
   if (displayedPosts.length === 0) {
     const emptyState = document.createElement('div');
@@ -2448,15 +2526,19 @@ function navigateModal(direction) {
 
 // Update stats
 function updateStats() {
-  const startIndex = (currentPage - 1) * postsPerPage;
-  const endIndex = Math.min(startIndex + displayedPosts.length, totalPosts);
+  // Infinite scroll accumulates pages into displayedPosts, so the range is
+  // always 1..loaded rather than a single page's slice.
+  const startIndex = isInfiniteScrollMode() ? 0 : (currentPage - 1) * postsPerPage;
+  const endIndex = isInfiniteScrollMode()
+    ? displayedPosts.length
+    : Math.min(startIndex + displayedPosts.length, totalPosts);
 
   document.getElementById('filtered-count').textContent = totalPosts > 0
     ? t('showingRangeOfTotal', { start: startIndex + 1, end: endIndex, total: totalPosts })
     : t('noPosts');
 
   const totalPages = Math.ceil(totalPosts / postsPerPage);
-  document.getElementById('page-info').textContent = totalPages > 0
+  document.getElementById('page-info').textContent = (totalPages > 0 && !isInfiniteScrollMode())
     ? t('pageOf', { page: currentPage, totalPages })
     : '';
 

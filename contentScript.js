@@ -652,7 +652,11 @@ async function fetchCollections() {
       moreAvailable = data.more_available;
       maxId = data.next_max_id || '';
 
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+      // Only pace between pages -- no need to wait after the final page (that
+      // 1s was pure latency on every collection action).
+      if (moreAvailable) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
     } catch (error) {
       console.error(`Error fetching collections: ${error.message}`);
       moreAvailable = false;
@@ -703,6 +707,34 @@ function normalizeCollection(item) {
   return item?.collection ? item.collection : item;
 }
 
+// Create the "nostalgia" collection. The www /api/v1/collections/create/ path
+// 404s; the private-API host (i.instagram.com) is the one that serves it -- the
+// same host the sync already GETs collections from. Try it first, fall back to
+// www, and surface the failing endpoint in the error.
+async function createNostalgiaCollection() {
+  const headers = { 'content-type': 'application/x-www-form-urlencoded; charset=UTF-8' };
+  const body = new URLSearchParams({
+    collection_name: NOSTALGIA_COLLECTION_NAME,
+    added_media_ids: '[]'
+  }).toString();
+
+  const attempts = [
+    'https://i.instagram.com/api/v1/collections/create/',
+    'https://www.instagram.com/api/v1/collections/create/'
+  ];
+
+  let lastError = null;
+  for (const url of attempts) {
+    try {
+      return await instagramApiRequest(url, { method: 'POST', headers, body, redirect: 'error' });
+    } catch (error) {
+      const host = url.includes('//i.') ? 'i.instagram' : 'www';
+      lastError = new Error(`create collection failed (${host}): ${error.message}`);
+    }
+  }
+  throw lastError;
+}
+
 async function ensureNostalgiaCollection() {
   const collections = await fetchCollections();
   const existingCollection = collections
@@ -713,21 +745,18 @@ async function ensureNostalgiaCollection() {
     return { collection: existingCollection, collections };
   }
 
-  const created = await instagramApiRequest('https://www.instagram.com/api/v1/collections/create/', {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/x-www-form-urlencoded; charset=UTF-8'
-    },
-    body: new URLSearchParams({
-      collection_name: NOSTALGIA_COLLECTION_NAME,
-      added_media_ids: '[]'
-    }).toString(),
-    redirect: 'error'
-  });
+  const created = await createNostalgiaCollection();
 
   const updatedCollections = await fetchCollections();
+
+  // Prefer the freshly-listed collection (has a stable id); fall back to the
+  // create response.
+  const listed = updatedCollections
+    .map(normalizeCollection)
+    .find((collection) => collection?.collection_name?.toLowerCase() === NOSTALGIA_COLLECTION_NAME);
+
   return {
-    collection: normalizeCollection(created),
+    collection: listed || normalizeCollection(created),
     collections: updatedCollections
   };
 }

@@ -64,7 +64,7 @@ function loadContentScript() {
           });
           void result;
         });
-        setTimeout(() => { if (!responded) resolve(undefined); }, 1500);
+        setTimeout(() => { if (!responded) resolve(undefined); }, 4500);
       });
     }
   };
@@ -170,5 +170,43 @@ describe('content script Instagram actions', () => {
     const saveCall = calls.find((c) => c.url.includes('/web/save/'));
     expect(saveCall.url).toBe('https://www.instagram.com/api/v1/web/save/333/save/');
     expect(String(saveCall.options.body)).toContain(encodeURIComponent('["777"]'));
+  });
+
+  test('ADD_POST_TO_NOSTALGIA_COLLECTION creates the collection via i.instagram when missing', async () => {
+    let created = false;
+    const { fetchMock, calls } = createFetchMock([
+      {
+        // Only i.instagram serves create; www would 404.
+        match: '/api/v1/collections/create/'
+      },
+      {
+        match: '/api/v1/collections/list/',
+        // First list is empty; after create, list returns the new collection.
+        get body() {
+          return created
+            ? { items: [{ collection: { collection_id: '888', collection_name: 'nostalgia' } }], more_available: false }
+            : { items: [], more_available: false };
+        }
+      },
+      { match: '/api/v1/web/save/' }
+    ]);
+    // Flip `created` once the create endpoint is hit.
+    const wrapped = jest.fn(async (url, options) => {
+      const result = await fetchMock(url, options);
+      if (String(url).includes('/collections/create/')) created = true;
+      return result;
+    });
+    global.fetch = wrapped;
+    const cs = loadContentScript();
+
+    const response = await cs.dispatch({
+      action: 'ADD_POST_TO_NOSTALGIA_COLLECTION',
+      post: { id: '999_111', link: 'https://www.instagram.com/p/qrs/' }
+    });
+
+    expect(response.success).toBe(true);
+    const createCall = calls.find((c) => c.url.includes('/collections/create/'));
+    expect(createCall.url).toBe('https://i.instagram.com/api/v1/collections/create/');
+    expect(response.collectionId).toBe('888');
   });
 });
