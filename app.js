@@ -17,8 +17,11 @@ let currentCollectionFilter = null;
 let currentAuthorFilter = null;
 // Multi-select: when active, clicking a tile toggles selection instead of
 // opening the modal, and the bulk toolbar acts on the chosen posts.
+// Keyed by post id -> post record, so a selection survives paging/filtering
+// (storing only ids meant posts scrolled off the page were counted in the
+// toolbar but silently skipped by the bulk actions).
 let selectionMode = false;
-const selectedPostIds = new Set();
+const selectedPosts = new Map();
 let currentSearchQuery = '';
 let currentModalIndex = -1;
 let currentCarouselIndex = 0; // Track which item in a carousel is being viewed
@@ -380,6 +383,14 @@ function rerenderLocalizedUi() {
   updateStats();
   renderPagination();
   checkSyncProgress();
+
+  // applyTranslations() resets data-i18n labels to their idle text, which would
+  // relabel the Select button back to "Select" mid-selection and blank the
+  // "N selected" counter -- restore the live state.
+  const selectBtn = document.getElementById('select-mode-btn');
+  if (selectBtn) selectBtn.textContent = selectionMode ? t('done') : t('select');
+  updateBulkToolbar();
+  fetchLibraryFacets(); // re-label collection/account "All ..." options
 
   if (isSyncing) {
     restoreSyncingState();
@@ -1222,7 +1233,7 @@ function renderLibraryStats(stats) {
 
 function setSelectionMode(enabled) {
   selectionMode = enabled;
-  if (!enabled) selectedPostIds.clear();
+  if (!enabled) selectedPosts.clear();
 
   const toolbar = document.getElementById('bulk-toolbar');
   if (toolbar) toolbar.style.display = enabled ? 'flex' : 'none';
@@ -1242,19 +1253,20 @@ function setSelectionMode(enabled) {
   updateBulkToolbar();
 }
 
-function togglePostSelection(postId, card) {
-  if (selectedPostIds.has(postId)) {
-    selectedPostIds.delete(postId);
+function togglePostSelection(post, card) {
+  if (!post || !post.id) return;
+  if (selectedPosts.has(post.id)) {
+    selectedPosts.delete(post.id);
     if (card) card.classList.remove('selected');
   } else {
-    selectedPostIds.add(postId);
+    selectedPosts.set(post.id, post);
     if (card) card.classList.add('selected');
   }
   updateBulkToolbar();
 }
 
 function updateBulkToolbar() {
-  const count = selectedPostIds.size;
+  const count = selectedPosts.size;
   const label = document.getElementById('bulk-count');
   if (label) label.textContent = t('selectedCount', { count });
 
@@ -1266,20 +1278,20 @@ function updateBulkToolbar() {
 
 function selectAllOnPage() {
   displayedPosts.forEach((post) => {
-    if (post && post.id) selectedPostIds.add(post.id);
+    if (post && post.id) selectedPosts.set(post.id, post);
   });
   document.querySelectorAll('.post-card').forEach((card) => card.classList.add('selected'));
   updateBulkToolbar();
 }
 
 function clearSelection() {
-  selectedPostIds.clear();
+  selectedPosts.clear();
   document.querySelectorAll('.post-card.selected').forEach((c) => c.classList.remove('selected'));
   updateBulkToolbar();
 }
 
 function getSelectedPosts() {
-  return displayedPosts.filter((p) => p && selectedPostIds.has(p.id));
+  return Array.from(selectedPosts.values());
 }
 
 // Run an async action over the selection with progress on the toolbar, pacing
@@ -1300,6 +1312,8 @@ async function runBulkAction(buttonId, idleLabelKey, worker, delayMs = 400) {
   });
 
   for (const post of posts) {
+    // Leaving selection mode mid-run acts as a cancel.
+    if (!selectionMode) break;
     try {
       await worker(post);
     } catch (e) {
@@ -1915,12 +1929,12 @@ function createPostCard(post, index) {
   }
 
   card.appendChild(info);
-  if (selectionMode && selectedPostIds.has(post.id)) card.classList.add('selected');
+  if (selectionMode && selectedPosts.has(post.id)) card.classList.add('selected');
 
   card.addEventListener('click', () => {
     // In selection mode a tile toggles selection rather than opening the modal.
     if (selectionMode) {
-      togglePostSelection(post.id, card);
+      togglePostSelection(post, card);
       return;
     }
     openModal(index);
@@ -2317,13 +2331,19 @@ function rollModalToNextPage() {
   if (currentPage >= totalPages) return; // genuinely the last post
 
   const gen = modalGeneration;
+  // In infinite-scroll (random) mode the grid holds every page loaded so far;
+  // replacing it with a single page would collapse the grid AND invalidate the
+  // modal's indices. Append instead, and resume scanning from where we were.
+  const append = isInfiniteScrollMode();
+  const searchFrom = append ? displayedPosts.length : 0;
+
   currentPage++;
-  loadPosts(false, false, () => {
+  loadPosts(append, false, () => {
     // Bail if the user closed or navigated the modal while the page loaded.
     if (gen !== modalGeneration) return;
-    const idx = findNextUnseenIndex(0);
+    const idx = findNextUnseenIndex(searchFrom);
     if (idx >= 0) {
-      window.scrollTo({ top: 0 });
+      if (!append) window.scrollTo({ top: 0 });
       openModal(idx);
     } else {
       // Whole page already seen (order shifted mid-sync): keep rolling.
@@ -3060,6 +3080,11 @@ function clearAllData() {
         totalPosts = 0;
         currentPage = 1;
         currentHashtagFilter = null;
+        // The library is gone: drop the collection/account filters and any
+        // multi-selection too, or the sidebar keeps offering stale options.
+        currentCollectionFilter = null;
+        currentAuthorFilter = null;
+        setSelectionMode(false);
 
         // Update UI
         document.getElementById('sync-synced-count').textContent = '0';
@@ -3069,6 +3094,7 @@ function clearAllData() {
         updateStats();
         renderPagination();
         updateHashtagChips();
+        fetchLibraryFacets();
 
 
         // Close panel

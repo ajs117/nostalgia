@@ -87,6 +87,66 @@ describe('combined filters', () => {
   });
 });
 
+describe('multi-select survives paging/filtering', () => {
+  // Mirrors the selectedPosts Map in app.js. The earlier Set-of-ids version
+  // resolved the selection against the CURRENT page, so posts scrolled off the
+  // page were counted in the toolbar but silently skipped by bulk actions.
+  function makeSelection() {
+    const selected = new Map();
+    return {
+      toggle(post) {
+        if (selected.has(post.id)) selected.delete(post.id);
+        else selected.set(post.id, post);
+      },
+      selectAll(posts) {
+        posts.forEach((p) => { if (p && p.id) selected.set(p.id, p); });
+      },
+      clear: () => selected.clear(),
+      count: () => selected.size,
+      getSelected: () => Array.from(selected.values())
+    };
+  }
+
+  test('selection made on one page is still actionable after the page changes', () => {
+    const sel = makeSelection();
+    const page1 = POSTS.slice(0, 2);
+    const page2 = POSTS.slice(2);
+
+    sel.selectAll(page1);
+    expect(sel.count()).toBe(2);
+
+    // Navigate to page 2: displayed posts change entirely.
+    void page2;
+    // Count and actionable set must still agree.
+    expect(sel.getSelected()).toHaveLength(2);
+    expect(sel.getSelected().map((p) => p.id)).toEqual(['1', '2']);
+  });
+
+  test('selecting across pages accumulates', () => {
+    const sel = makeSelection();
+    sel.selectAll(POSTS.slice(0, 2));
+    sel.selectAll(POSTS.slice(2, 4));
+    expect(sel.count()).toBe(4);
+    expect(sel.getSelected().map((p) => p.id)).toEqual(['1', '2', '3', '4']);
+  });
+
+  test('toolbar count always equals the number of actionable posts', () => {
+    const sel = makeSelection();
+    sel.selectAll(POSTS);
+    expect(sel.count()).toBe(sel.getSelected().length);
+    sel.toggle(POSTS[0]);
+    expect(sel.count()).toBe(sel.getSelected().length);
+  });
+
+  test('toggle removes a previously selected post', () => {
+    const sel = makeSelection();
+    sel.toggle(POSTS[0]);
+    expect(sel.count()).toBe(1);
+    sel.toggle(POSTS[0]);
+    expect(sel.count()).toBe(0);
+  });
+});
+
 describe('facet aggregation', () => {
   // Mirrors the counting loop in getLibraryFacets().
   function aggregate(posts) {
