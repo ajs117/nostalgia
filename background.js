@@ -511,6 +511,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return false;
   }
 
+  if (request.action === 'GET_LIBRARY_FACETS') {
+    getLibraryFacets().then((facets) => {
+      sendResponse({ success: true, ...facets });
+    }).catch((error) => {
+      console.error('Error building library facets:', error);
+      sendResponse({ success: false, error: describeStorageError(error) });
+    });
+    return true;
+  }
+
   if (request.action === 'GET_INSTAGRAM_POSTS') {
     // Paginated post retrieval
     const page = request.page || 1;
@@ -520,8 +530,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     const searchQuery = request.searchQuery || '';
     const hashtagFilter = request.hashtagFilter || null;
     const randomSeed = Number.isFinite(request.randomSeed) ? request.randomSeed : null;
+    const collectionFilter = request.collectionFilter || null;
+    const authorFilter = request.authorFilter || null;
 
-    getPostsPaginated(page, limit, sortBy, filterType, searchQuery, hashtagFilter, randomSeed).then(async (result) => {
+    getPostsPaginated(page, limit, sortBy, filterType, searchQuery, hashtagFilter, randomSeed, collectionFilter, authorFilter).then(async (result) => {
       // Thumbnails are stored as binary blobs; rehydrate the page's records to
       // data URLs here so the viewer's render path stays unchanged.
       result.posts = await hydrateThumbnails(result.posts);
@@ -1596,7 +1608,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'IMPORT_BEGIN') {
-    importCollectionsAndMetadata(request.collections, request.metadata).then(() => {
+    importCollectionsAndMetadata(request.collections, request.metadata, request.syncState).then(() => {
       sendResponse({ success: true });
     }).catch((error) => {
       console.error('Error importing collections/metadata:', error);
@@ -2108,7 +2120,7 @@ function comparePostsForStableRandom(a, b, randomSeed) {
 }
 
 // Get posts with pagination, sorting, and filtering
-async function getPostsPaginated(page = 1, limit = 50, sortBy = 'newest-saved', filterType = 'all', searchQuery = '', hashtagFilter = null, randomSeed = null) {
+async function getPostsPaginated(page = 1, limit = 50, sortBy = 'newest-saved', filterType = 'all', searchQuery = '', hashtagFilter = null, randomSeed = null, collectionFilter = null, authorFilter = null) {
   let db;
   try {
     db = await openDB();
@@ -2146,18 +2158,32 @@ async function getPostsPaginated(page = 1, limit = 50, sortBy = 'newest-saved', 
           if (!hashtags.includes(hashtagFilter.toLowerCase())) return false;
         }
 
+        // Apply Instagram collection filter
+        if (collectionFilter) {
+          const ids = Array.isArray(post.collectionIds) ? post.collectionIds.map(String) : [];
+          if (!ids.includes(String(collectionFilter))) return false;
+        }
+
+        // Apply author filter
+        if (authorFilter) {
+          if ((post.username || '').toLowerCase() !== String(authorFilter).toLowerCase()) return false;
+        }
+
         return true;
       };
+
+      // Any of these filters force the full-scan path (no index shortcut).
+      const hasScanFilters = !!searchQuery || !!hashtagFilter || !!collectionFilter ||
+        !!authorFilter || filterType !== 'all';
 
       // For saved-order-based sorts (newest/oldest saved), use savedOrder index
       // API returns newest first, so lower savedOrder = newer
       const useSavedOrderIndex = (sortBy === 'newest-saved' || sortBy === 'newest' ||
-        sortBy === 'oldest-saved' || sortBy === 'oldest') &&
-        !searchQuery && !hashtagFilter && filterType === 'all';
+        sortBy === 'oldest-saved' || sortBy === 'oldest') && !hasScanFilters;
 
       // For posted-date-based sorts, use takenAt index
       const useTakenAtIndex = (sortBy === 'newest-posted' || sortBy === 'oldest-posted') &&
-        !searchQuery && !hashtagFilter && filterType === 'all';
+        !hasScanFilters;
 
       if (useSavedOrderIndex) {
         // Fast path: use savedOrder index with cursor advancement for true pagination
@@ -2785,6 +2811,9 @@ async function rebuildHashtagCache(expectedCount = null) {
 }
 
 function scheduleHashtagCacheRebuild(expectedCount = null) {
+  // Posts changed -> the author/collection/stats facets are stale too.
+  invalidateLibraryFacets();
+
   if (hashtagCacheRebuildScheduled || hashtagCacheRebuildInProgress) {
     return;
   }
@@ -2962,7 +2991,120 @@ async function clearAllPosts() {
   }
 }
 
+// One pass over the posts store producing everything the sidebar filters and
+// the stats panel need: authors with counts, per-collection counts, and totals.
+// Cached briefly because a full scan on a large library isn't free.
+let libraryFacetsCache = null;
+let libraryFacetsCachedAt = 0;
+const LIBRARY_FACETS_TTL_MS = 60 * 1000;
+
+function invalidateLibraryFacets() {
+  libraryFacetsCache = null;
+}
+
+async function getLibraryFacets() {
+  const now = Date.now();
+  if (libraryFacetsCache && (now - libraryFacetsCachedAt) < LIBRARY_FACETS_TTL_MS) {
+    return libraryFacetsCache;
+  }
+
+  const db = await openDB();
+  try {
+    const storedCollections = await new Promise((resolve, reject) => {
+      const tx = db.transaction([STORE_COLLECTIONS], 'readonly');
+      const request = tx.objectStore(STORE_COLLECTIONS).get('all_collections');
+      request.onsuccess = () => resolve(request.result || []);
+      request.onerror = () => reject(request.error);
+    });
+
+    const scan = await new Promise((resolve, reject) => {
+      const tx = db.transaction([STORE_POSTS], 'readonly');
+      const authorCounts = new Map();
+      const collectionCounts = new Map();
+      let total = 0;
+      let videos = 0;
+      let carousels = 0;
+      let unavailable = 0;
+      let oldestSavedAt = null;
+      let newestSavedAt = null;
+
+      const cursorRequest = tx.objectStore(STORE_POSTS).openCursor();
+      cursorRequest.onsuccess = () => {
+        const cursor = cursorRequest.result;
+        if (!cursor) {
+          resolve({ authorCounts, collectionCounts, total, videos, carousels, unavailable, oldestSavedAt, newestSavedAt });
+          return;
+        }
+        const post = cursor.value;
+        total++;
+        if (post.isVideo) videos++;
+        if (post.isCarousel) carousels++;
+        if (post.unavailable) unavailable++;
+
+        const username = post.username || '';
+        if (username) authorCounts.set(username, (authorCounts.get(username) || 0) + 1);
+
+        if (Array.isArray(post.collectionIds)) {
+          post.collectionIds.forEach((id) => {
+            const key = String(id);
+            collectionCounts.set(key, (collectionCounts.get(key) || 0) + 1);
+          });
+        }
+
+        const ts = post.timestamp;
+        if (typeof ts === 'number') {
+          if (oldestSavedAt === null || ts < oldestSavedAt) oldestSavedAt = ts;
+          if (newestSavedAt === null || ts > newestSavedAt) newestSavedAt = ts;
+        }
+
+        cursor.continue();
+      };
+      cursorRequest.onerror = () => reject(cursorRequest.error);
+    });
+
+    const authors = [...scan.authorCounts.entries()]
+      .map(([username, count]) => ({ username, count }))
+      .sort((a, b) => b.count - a.count || a.username.localeCompare(b.username));
+
+    const collections = (storedCollections || [])
+      .map((entry) => (entry && entry.collection ? entry.collection : entry))
+      .filter((c) => c && (c.collection_id || c.collection_pk || c.id))
+      .map((c) => {
+        const id = String(c.collection_id || c.collection_pk || c.id);
+        return {
+          id,
+          name: c.collection_name || id,
+          count: scan.collectionCounts.get(id) || 0
+        };
+      })
+      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+
+    libraryFacetsCache = {
+      authors,
+      collections,
+      stats: {
+        total: scan.total,
+        videos: scan.videos,
+        photos: scan.total - scan.videos,
+        carousels: scan.carousels,
+        unavailable: scan.unavailable,
+        authors: authors.length,
+        oldestSavedAt: scan.oldestSavedAt,
+        newestSavedAt: scan.newestSavedAt
+      }
+    };
+    libraryFacetsCachedAt = Date.now();
+    return libraryFacetsCache;
+  } finally {
+    db.close();
+  }
+}
+
 const BACKUP_FORMAT_VERSION = 1;
+// Mirrors the keys the content script writes (contentScript.js); the backup has
+// to carry these or a restore silently triggers a full re-sync.
+const SYNC_CURSOR_KEY = 'nostalgia_sync_cursor';
+const SYNC_PROGRESS_KEY = 'instagram_sync_progress';
 
 // ---- Chunked backup: export side -------------------------------------------
 // The viewer assembles the backup file from these pieces; nothing here returns
@@ -3001,13 +3143,27 @@ async function getExportManifest() {
       request.onerror = () => reject(request.error);
     });
 
+    // The sync cursor lives in chrome.storage.local, not IndexedDB. Without it
+    // a restored backup has every post but backfillComplete=false, so the next
+    // sync re-walks the whole feed from scratch -- the exact multi-hour job the
+    // backup is supposed to save you from.
+    const syncState = await new Promise((resolve) => {
+      chrome.storage.local.get([SYNC_CURSOR_KEY, SYNC_PROGRESS_KEY], (result) => {
+        resolve({
+          cursor: result?.[SYNC_CURSOR_KEY] || null,
+          progress: result?.[SYNC_PROGRESS_KEY] || null
+        });
+      });
+    });
+
     return {
       version: BACKUP_FORMAT_VERSION,
       exportedAt: new Date().toISOString(),
       postsCount,
       collections,
       metadata,
-      mediaKeys
+      mediaKeys,
+      syncState
     };
   } finally {
     db.close();
@@ -3080,7 +3236,7 @@ async function getMediaChunk(keys) {
 // Posts and media are upserted by key (importing into a non-empty library
 // merges rather than duplicates); collections and metadata are replaced.
 
-async function importCollectionsAndMetadata(collections, metadata) {
+async function importCollectionsAndMetadata(collections, metadata, syncState) {
   const db = await openDB();
   try {
     await new Promise((resolve, reject) => {
@@ -3095,6 +3251,17 @@ async function importCollectionsAndMetadata(collections, metadata) {
     });
   } finally {
     db.close();
+  }
+
+  // Restore the sync cursor so the next sync resumes incrementally (TOP phase
+  // only) instead of re-walking the entire saved feed. Older backups have no
+  // syncState -- those keep the previous behavior.
+  if (syncState && syncState.cursor) {
+    await new Promise((resolve) => {
+      const payload = { [SYNC_CURSOR_KEY]: syncState.cursor };
+      if (syncState.progress) payload[SYNC_PROGRESS_KEY] = syncState.progress;
+      chrome.storage.local.set(payload, resolve);
+    });
   }
 }
 

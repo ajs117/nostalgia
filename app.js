@@ -13,6 +13,12 @@ let gridLoadInFlight = false;
 let infiniteScrollObserver = null;
 let currentTypeFilter = 'all';
 let currentHashtagFilter = null;
+let currentCollectionFilter = null;
+let currentAuthorFilter = null;
+// Multi-select: when active, clicking a tile toggles selection instead of
+// opening the modal, and the bulk toolbar acts on the chosen posts.
+let selectionMode = false;
+const selectedPostIds = new Set();
 let currentSearchQuery = '';
 let currentModalIndex = -1;
 let currentCarouselIndex = 0; // Track which item in a carousel is being viewed
@@ -696,6 +702,7 @@ document.addEventListener('DOMContentLoaded', () => {
   setupSyncPanel();
   setupSettingsModal();
   setupInfiniteScroll();
+  fetchLibraryFacets();
   adoptRunningSyncThenMaybeAutoStart();
 
   // Clear any stale sync status on fresh page load
@@ -731,6 +738,32 @@ function initializeEventListeners() {
   if (sortSelect) sortSelect.addEventListener('change', handleSortChange);
   if (typeFilter) typeFilter.addEventListener('change', handleTypeFilterChange);
   if (randomRefreshBtn) randomRefreshBtn.addEventListener('click', handleRandomReshuffle);
+
+  // Multi-select + bulk actions
+  const selectModeBtn = document.getElementById('select-mode-btn');
+  if (selectModeBtn) selectModeBtn.addEventListener('click', () => setSelectionMode(!selectionMode));
+  const bulkWiring = [
+    ['bulk-select-page-btn', selectAllOnPage],
+    ['bulk-clear-btn', clearSelection],
+    ['bulk-download-btn', bulkDownloadSelected],
+    ['bulk-collection-btn', bulkAddSelectedToCollection],
+    ['bulk-remove-btn', bulkRemoveSelected],
+    ['bulk-exit-btn', () => setSelectionMode(false)]
+  ];
+  bulkWiring.forEach(([id, handler]) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('click', handler);
+  });
+
+  // Collection / account filters (desktop + mobile share the same handlers)
+  ['collection-filter', 'collection-filter-mobile'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('change', (e) => applyFilterSelection({ collection: e.target.value }));
+  });
+  ['author-filter', 'author-filter-mobile'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('change', (e) => applyFilterSelection({ author: e.target.value }));
+  });
 
   // Mobile search
   const searchInputMobile = document.getElementById('search-input-mobile');
@@ -829,6 +862,8 @@ function loadPosts(append = false, fetchHashtagsAfter = false, onComplete = null
     filterType: currentTypeFilter,
     searchQuery: currentSearchQuery,
     hashtagFilter: currentHashtagFilter,
+    collectionFilter: currentCollectionFilter,
+    authorFilter: currentAuthorFilter,
     randomSeed: currentSort === 'random' ? currentRandomSeed : null
   }, (response) => {
     if (requestId !== latestLoadRequestId) {
@@ -952,6 +987,7 @@ function setupMessageListener() {
       currentPage = 1;
       loadPosts();
       scheduleFetchAllHashtags(); // Refresh hashtags after sync (debounced)
+      fetchLibraryFacets(); // Accounts/collections/stats change after a sync
     } else if (request.action === 'SYNC_LOGIN_REQUIRED') {
       handleSyncLoginRequired(request.error || 'Instagram login required.');
     } else if (request.action === 'IMPORT_FAILED') {
@@ -1059,6 +1095,338 @@ function handleSortChangeMobile(e) {
   if (desktopSelect) desktopSelect.value = e.target.value;
   currentPage = 1;
   loadPosts();
+}
+
+// ---- Collection / account filters + library stats --------------------------
+
+function applyFilterSelection({ collection, author }) {
+  if (collection !== undefined) currentCollectionFilter = collection || null;
+  if (author !== undefined) currentAuthorFilter = author || null;
+
+  // Keep desktop and mobile controls in step.
+  [['collection-filter', currentCollectionFilter], ['collection-filter-mobile', currentCollectionFilter],
+    ['author-filter', currentAuthorFilter], ['author-filter-mobile', currentAuthorFilter]]
+    .forEach(([id, value]) => {
+      const el = document.getElementById(id);
+      if (el) el.value = value || '';
+    });
+
+  currentPage = 1;
+  loadPosts();
+}
+
+function fetchLibraryFacets() {
+  chrome.runtime.sendMessage({ action: 'GET_LIBRARY_FACETS' }, (response) => {
+    if (chrome.runtime.lastError || !response || !response.success) return;
+    renderCollectionOptions(response.collections || []);
+    renderAuthorOptions(response.authors || []);
+    renderLibraryStats(response.stats || null);
+  });
+}
+
+function renderCollectionOptions(collections) {
+  ['collection-filter', 'collection-filter-mobile'].forEach((id) => {
+    const select = document.getElementById(id);
+    if (!select) return;
+    const current = currentCollectionFilter || '';
+    select.innerHTML = '';
+
+    const allOpt = document.createElement('option');
+    allOpt.value = '';
+    allOpt.textContent = t('allCollections');
+    select.appendChild(allOpt);
+
+    collections.forEach(({ id: cid, name, count }) => {
+      const opt = document.createElement('option');
+      opt.value = cid;
+      // Always show the count -- a "(0)" makes it obvious when Instagram didn't
+      // return saved_collection_ids for those posts (needs a re-sync) rather
+      // than the filter silently returning nothing.
+      opt.textContent = `${name} (${count})`;
+      select.appendChild(opt);
+    });
+
+    select.value = current;
+  });
+}
+
+function renderAuthorOptions(authors) {
+  // Cap the dropdown: some libraries have thousands of distinct accounts.
+  const MAX_AUTHORS = 300;
+  ['author-filter', 'author-filter-mobile'].forEach((id) => {
+    const select = document.getElementById(id);
+    if (!select) return;
+    const current = currentAuthorFilter || '';
+    select.innerHTML = '';
+
+    const allOpt = document.createElement('option');
+    allOpt.value = '';
+    allOpt.textContent = t('allAccounts');
+    select.appendChild(allOpt);
+
+    authors.slice(0, MAX_AUTHORS).forEach(({ username, count }) => {
+      const opt = document.createElement('option');
+      opt.value = username;
+      opt.textContent = `@${username} (${count})`;
+      select.appendChild(opt);
+    });
+
+    // Keep an active filter selectable even if it fell outside the cap.
+    if (current && !Array.from(select.options).some((o) => o.value === current)) {
+      const opt = document.createElement('option');
+      opt.value = current;
+      opt.textContent = `@${current}`;
+      select.appendChild(opt);
+    }
+
+    select.value = current;
+  });
+}
+
+function renderLibraryStats(stats) {
+  const container = document.getElementById('library-stats');
+  if (!container) return;
+  if (!stats) {
+    container.innerHTML = '';
+    return;
+  }
+
+  const rows = [
+    [t('statTotal'), stats.total],
+    [t('statPhotos'), stats.photos],
+    [t('statVideos'), stats.videos],
+    [t('statAccounts'), stats.authors]
+  ];
+  if (stats.unavailable > 0) rows.push([t('statUnavailable'), stats.unavailable]);
+
+  container.innerHTML = '';
+  rows.forEach(([label, value]) => {
+    const row = document.createElement('div');
+    row.className = 'library-stat-row';
+
+    const l = document.createElement('span');
+    l.className = 'library-stat-label';
+    l.textContent = label;
+
+    const v = document.createElement('span');
+    v.className = 'library-stat-value';
+    v.textContent = Number(value || 0).toLocaleString();
+
+    row.appendChild(l);
+    row.appendChild(v);
+    container.appendChild(row);
+  });
+}
+
+// ---- Multi-select + bulk actions -------------------------------------------
+
+function setSelectionMode(enabled) {
+  selectionMode = enabled;
+  if (!enabled) selectedPostIds.clear();
+
+  const toolbar = document.getElementById('bulk-toolbar');
+  if (toolbar) toolbar.style.display = enabled ? 'flex' : 'none';
+
+  const btn = document.getElementById('select-mode-btn');
+  if (btn) {
+    btn.textContent = enabled ? t('done') : t('select');
+    btn.classList.toggle('active', enabled);
+  }
+
+  const container = document.getElementById('posts-container');
+  if (container) container.classList.toggle('selecting', enabled);
+
+  if (!enabled) {
+    document.querySelectorAll('.post-card.selected').forEach((c) => c.classList.remove('selected'));
+  }
+  updateBulkToolbar();
+}
+
+function togglePostSelection(postId, card) {
+  if (selectedPostIds.has(postId)) {
+    selectedPostIds.delete(postId);
+    if (card) card.classList.remove('selected');
+  } else {
+    selectedPostIds.add(postId);
+    if (card) card.classList.add('selected');
+  }
+  updateBulkToolbar();
+}
+
+function updateBulkToolbar() {
+  const count = selectedPostIds.size;
+  const label = document.getElementById('bulk-count');
+  if (label) label.textContent = t('selectedCount', { count });
+
+  ['bulk-download-btn', 'bulk-collection-btn', 'bulk-remove-btn'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = count === 0;
+  });
+}
+
+function selectAllOnPage() {
+  displayedPosts.forEach((post) => {
+    if (post && post.id) selectedPostIds.add(post.id);
+  });
+  document.querySelectorAll('.post-card').forEach((card) => card.classList.add('selected'));
+  updateBulkToolbar();
+}
+
+function clearSelection() {
+  selectedPostIds.clear();
+  document.querySelectorAll('.post-card.selected').forEach((c) => c.classList.remove('selected'));
+  updateBulkToolbar();
+}
+
+function getSelectedPosts() {
+  return displayedPosts.filter((p) => p && selectedPostIds.has(p.id));
+}
+
+// Run an async action over the selection with progress on the toolbar, pacing
+// between items so we don't hammer Instagram or the downloads API.
+async function runBulkAction(buttonId, idleLabelKey, worker, delayMs = 400) {
+  const posts = getSelectedPosts();
+  if (posts.length === 0) return;
+
+  const btn = document.getElementById(buttonId);
+  const original = btn ? btn.textContent : '';
+  let done = 0;
+  let failed = 0;
+
+  if (btn) btn.disabled = true;
+  ['bulk-download-btn', 'bulk-collection-btn', 'bulk-remove-btn'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = true;
+  });
+
+  for (const post of posts) {
+    try {
+      await worker(post);
+    } catch (e) {
+      failed++;
+    }
+    done++;
+    if (btn) btn.textContent = `${done}/${posts.length}`;
+    if (delayMs > 0 && done < posts.length) {
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+
+  if (btn) btn.textContent = original || t(idleLabelKey);
+  updateBulkToolbar();
+
+  if (failed > 0) alert(t('bulkPartialFailure', { failed, total: posts.length }));
+  return { done, failed };
+}
+
+// Resolve a downloadable media URL for a post WITHOUT relying on modal state.
+// getPrimaryMediaForPost() reads currentModalVideoUrl / currentCarouselIndex,
+// so it only works for the post that's currently open -- bulk downloads must
+// fetch each post's real URL (full-res image or CDN video) on demand.
+function resolveDownloadMediaForPost(post) {
+  return new Promise((resolve) => {
+    const ask = (message, pick) => {
+      chrome.runtime.sendMessage(message, (response) => {
+        if (chrome.runtime.lastError || !response || !response.success) {
+          resolve(null);
+        } else {
+          resolve(pick(response));
+        }
+      });
+    };
+
+    const carouselFirst = post.isCarousel && post.carouselMedia && post.carouselMedia.length > 0
+      ? post.carouselMedia[0]
+      : null;
+
+    if (carouselFirst) {
+      if (carouselFirst.isVideo) {
+        ask({ action: 'FETCH_CAROUSEL_VIDEO', permalink: post.link, postId: post.id, carouselIndex: 0 },
+          (r) => ({ isVideo: true, url: r.videoUrl, extension: 'mp4' }));
+      } else {
+        resolve({ isVideo: false, url: carouselFirst.imageUrl || post.image || post.thumbnail || null, extension: 'jpg' });
+      }
+      return;
+    }
+
+    if (post.isVideo) {
+      ask({ action: 'FETCH_VIDEO_CDN', permalink: post.link, postId: post.id },
+        (r) => ({ isVideo: true, url: r.videoUrl, extension: 'mp4' }));
+      return;
+    }
+
+    // Images: prefer full resolution, fall back to the stored thumbnail.
+    if (post.link) {
+      chrome.runtime.sendMessage({ action: 'FETCH_FULL_IMAGE', permalink: post.link, postId: post.id }, (response) => {
+        const url = (!chrome.runtime.lastError && response && response.success && response.imageUrl)
+          ? response.imageUrl
+          : (post.image || post.thumbnail || null);
+        resolve(url ? { isVideo: false, url, extension: 'jpg' } : null);
+      });
+      return;
+    }
+
+    const fallback = post.image || post.thumbnail || null;
+    resolve(fallback ? { isVideo: false, url: fallback, extension: 'jpg' } : null);
+  });
+}
+
+function bulkDownloadSelected() {
+  const posts = getSelectedPosts();
+  if (posts.length === 0) return;
+  if (!confirm(t('bulkDownloadConfirm', { count: posts.length }))) return;
+
+  runBulkAction('bulk-download-btn', 'downloadSelected', async (post) => {
+    const media = await resolveDownloadMediaForPost(post);
+    if (!media?.url) throw new Error('no media');
+
+    await new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage({
+        action: 'DOWNLOAD_MEDIA',
+        url: media.url,
+        filename: buildDownloadFilename(post, media)
+      }, (response) => {
+        if (response && response.success) resolve(); else reject(new Error(response?.error || 'failed'));
+      });
+    });
+  }, 600);
+}
+
+function bulkAddSelectedToCollection() {
+  const posts = getSelectedPosts();
+  if (posts.length === 0) return;
+  if (!confirm(t('bulkCollectionConfirm', { count: posts.length }))) return;
+
+  runBulkAction('bulk-collection-btn', 'addSelectedToCollection', (post) => new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage({
+      action: 'ADD_POST_TO_NOSTALGIA_COLLECTION',
+      post: { id: post.id, link: post.link, title: post.title, username: post.username }
+    }, (response) => {
+      if (response && response.success) resolve(); else reject(new Error(response?.error || 'failed'));
+    });
+  }), 800);
+}
+
+async function bulkRemoveSelected() {
+  const posts = getSelectedPosts();
+  if (posts.length === 0) return;
+  if (!confirm(t('bulkRemoveConfirm', { count: posts.length }))) return;
+
+  await runBulkAction('bulk-remove-btn', 'removeSelected', (post) => new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage({ action: 'DELETE_SINGLE_POST', postId: post.id }, (response) => {
+      if (response && response.success) {
+        allPosts = allPosts.filter((p) => p.id !== post.id);
+        totalPosts = Math.max(0, totalPosts - 1);
+        resolve();
+      } else {
+        reject(new Error(response?.error || 'failed'));
+      }
+    });
+  }), 100);
+
+  clearSelection();
+  loadPosts();
+  fetchLibraryFacets();
 }
 
 // Type filter handlers
@@ -1547,7 +1915,16 @@ function createPostCard(post, index) {
   }
 
   card.appendChild(info);
-  card.addEventListener('click', () => openModal(index));
+  if (selectionMode && selectedPostIds.has(post.id)) card.classList.add('selected');
+
+  card.addEventListener('click', () => {
+    // In selection mode a tile toggles selection rather than opening the modal.
+    if (selectionMode) {
+      togglePostSelection(post.id, card);
+      return;
+    }
+    openModal(index);
+  });
 
   return card;
 }
@@ -2762,6 +3139,9 @@ async function exportData() {
       posts,
       collections: manifest.collections,
       metadata: manifest.metadata,
+      // Carries the sync cursor so a restore resumes incrementally instead of
+      // re-walking the whole feed.
+      syncState: manifest.syncState,
       media
     };
 
@@ -2824,7 +3204,12 @@ function importData(file) {
     // Chunked restore: collections/metadata first, then posts and media in
     // slices, then a finalize pass that recounts and rebuilds caches.
     try {
-      await sendBackupMessage({ action: 'IMPORT_BEGIN', collections: data.collections, metadata: data.metadata });
+      await sendBackupMessage({
+        action: 'IMPORT_BEGIN',
+        collections: data.collections,
+        metadata: data.metadata,
+        syncState: data.syncState
+      });
 
       for (let i = 0; i < data.posts.length; i += IMPORT_POSTS_CHUNK_SIZE) {
         await sendBackupMessage({ action: 'IMPORT_POSTS_CHUNK', posts: data.posts.slice(i, i + IMPORT_POSTS_CHUNK_SIZE) });

@@ -231,11 +231,30 @@
             <option value="video" data-i18n="videosOnly">Videos Only</option>
           </select>
         </div>
+
+        <div class="filter-group">
+          <label class="filter-label" for="collection-filter" data-i18n="collection">Collection</label>
+          <select id="collection-filter">
+            <option value="" data-i18n="allCollections">All Collections</option>
+          </select>
+        </div>
+
+        <div class="filter-group">
+          <label class="filter-label" for="author-filter" data-i18n="account">Account</label>
+          <select id="author-filter">
+            <option value="" data-i18n="allAccounts">All Accounts</option>
+          </select>
+        </div>
       </div>
 
       <div class="sidebar-section">
         <h3 class="sidebar-title" data-i18n="popularHashtags">Popular Hashtags</h3>
         <div id="hashtag-chips"></div>
+      </div>
+
+      <div class="sidebar-section">
+        <h3 class="sidebar-title" data-i18n="libraryStats">Library</h3>
+        <div id="library-stats" class="library-stats"></div>
       </div>
     </aside>
 
@@ -265,7 +284,23 @@
       <!-- Stats Bar -->
       <div class="stats-bar">
         <span id="filtered-count">Loading...</span>
-        <span id="page-info"></span>
+        <div class="stats-bar-actions">
+          <span id="page-info"></span>
+          <button id="select-mode-btn" class="select-mode-btn" type="button" data-i18n="select">Select</button>
+        </div>
+      </div>
+
+      <!-- Bulk actions toolbar (multi-select) -->
+      <div id="bulk-toolbar" class="bulk-toolbar" style="display: none;">
+        <span id="bulk-count" class="bulk-count"></span>
+        <div class="bulk-actions">
+          <button id="bulk-select-page-btn" class="bulk-btn" type="button" data-i18n="selectPage">Select page</button>
+          <button id="bulk-clear-btn" class="bulk-btn" type="button" data-i18n="clearSelection">Clear</button>
+          <button id="bulk-download-btn" class="bulk-btn" type="button" data-i18n="downloadSelected">Download</button>
+          <button id="bulk-collection-btn" class="bulk-btn" type="button" data-i18n="addSelectedToCollection">Add to collection</button>
+          <button id="bulk-remove-btn" class="bulk-btn bulk-btn-danger" type="button" data-i18n="removeSelected">Remove</button>
+          <button id="bulk-exit-btn" class="bulk-btn" type="button" data-i18n="done">Done</button>
+        </div>
       </div>
 
       <!-- Posts Grid -->
@@ -311,6 +346,18 @@
           <option value="all" data-i18n="allPosts">All Posts</option>
           <option value="photo" data-i18n="photosOnly">Photos Only</option>
           <option value="video" data-i18n="videosOnly">Videos Only</option>
+        </select>
+      </div>
+      <div class="filter-group">
+        <label class="filter-label" for="collection-filter-mobile" data-i18n="collection">Collection</label>
+        <select id="collection-filter-mobile">
+          <option value="" data-i18n="allCollections">All Collections</option>
+        </select>
+      </div>
+      <div class="filter-group">
+        <label class="filter-label" for="author-filter-mobile" data-i18n="account">Account</label>
+        <select id="author-filter-mobile">
+          <option value="" data-i18n="allAccounts">All Accounts</option>
         </select>
       </div>
       <div class="filter-group">
