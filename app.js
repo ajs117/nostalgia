@@ -826,6 +826,13 @@ function initializeEventListeners() {
 
     if (e.key === 'Escape' && currentModalIndex >= 0) {
       closeModal();
+      return;
+    }
+
+    // Escape also backs out of multi-select (nothing else consumes it there).
+    if (e.key === 'Escape' && selectionMode) {
+      setSelectionMode(false);
+      return;
     }
     if (currentModalIndex >= 0) {
       if (e.key === 'ArrowLeft') navigateModal(-1);
@@ -986,7 +993,7 @@ function setupMessageListener() {
         // updates every few seconds instead of thrashing on every batch.
         scheduleSyncGridRefresh();
       } else {
-        loadPosts();
+        reloadGridSafely();
         scheduleFetchAllHashtags(); // Refresh hashtags when posts are updated (debounced)
       }
     } else if (request.action === 'SYNC_STARTED') {
@@ -1038,9 +1045,36 @@ function scheduleSyncGridRefresh() {
       scheduleSyncGridRefresh();
       return;
     }
-    loadPosts();
+    reloadGridSafely();
     scheduleFetchAllHashtags();
   }, 4000);
+}
+
+// Live grid refreshes must not clobber an infinite-scroll session: loadPosts()
+// replaces the grid with just `currentPage`'s slice, so after scrolling through
+// several pages a refresh would collapse the grid to the last page and strand
+// the user mid-scroll. Skip the refresh there (the sync status line still shows
+// progress; SYNC_COMPLETE resets to page 1 and reloads properly).
+//
+// Also never reload while the modal is open: replacing displayedPosts would
+// leave currentModalIndex pointing at a different post (bumping a post to top
+// reorders the library and fires UPDATE_ITEMS). Defer to modal close instead.
+let gridRefreshPending = false;
+
+function reloadGridSafely() {
+  if (currentModalIndex >= 0) {
+    gridRefreshPending = true;
+    return;
+  }
+  if (isInfiniteScrollMode() && currentPage > 1) return;
+  loadPosts();
+}
+
+function flushPendingGridRefresh() {
+  if (!gridRefreshPending) return;
+  gridRefreshPending = false;
+  if (isInfiniteScrollMode() && currentPage > 1) return;
+  loadPosts();
 }
 
 // The saved-order rebuild is triggered automatically by the background sync
@@ -1788,6 +1822,11 @@ function renderPosts(append = false) {
   // Infinite-scroll append: only add the newly-loaded tail so scroll position
   // is preserved and existing cards aren't rebuilt.
   if (append) {
+    // Drop a leftover empty-state placeholder, or it would sit above the
+    // first appended cards.
+    const emptyState = container.querySelector('.empty-state');
+    if (emptyState) emptyState.remove();
+
     const already = container.querySelectorAll('.post-card').length;
     const fragment = document.createDocumentFragment();
     for (let i = already; i < displayedPosts.length; i++) {
@@ -2911,6 +2950,9 @@ function closeModal() {
   currentModalIndex = -1;
   currentCarouselIndex = 0;
   currentModalVideoUrl = null;
+
+  // Apply any grid reload that was deferred while the modal was open.
+  flushPendingGridRefresh();
 }
 
 // Navigate modal
